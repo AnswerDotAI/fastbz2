@@ -191,12 +191,18 @@ struct Decoder {
     tt: Vec<u32>,
 }
 
+pub(crate) struct DecodedCandidate {
+    pub output: Vec<u8>,
+    pub end_bit: u64,
+    pub block_len: usize,
+}
+
 impl Decoder {
     fn new() -> Self {
         Self { tt: Vec::new() }
     }
 
-    fn block(&mut self, bits: &mut Bits<'_>, level: u8, expected_crc: Option<u32>) -> Result<(Vec<u8>, u32)> {
+    fn block(&mut self, bits: &mut Bits<'_>, level: u8, expected_crc: Option<u32>) -> Result<(Vec<u8>, u32, usize)> {
         let block_offset = bits.position().saturating_sub(48);
         let stored_crc = bits.read(32)?;
         if expected_crc.is_some_and(|expected| expected != stored_crc) {
@@ -366,8 +372,17 @@ impl Decoder {
         if bz2_crc32(&output) != stored_crc {
             return Err(decode_error(block_offset, DecodeError::CrcMismatch));
         }
-        Ok((output, stored_crc))
+        Ok((output, stored_crc, block_len))
     }
+}
+
+pub(crate) fn decode_candidate(data: &[u8], start_bit: u64, expected_crc: u32) -> Result<DecodedCandidate> {
+    let mut bits = Bits::at(data, start_bit)?;
+    if bits.magic()? != BLOCK_MAGIC {
+        return Err(decode_error(start_bit, DecodeError::InvalidMagic));
+    }
+    let (output, _, block_len) = Decoder::new().block(&mut bits, 9, Some(expected_crc))?;
+    Ok(DecodedCandidate { output, end_bit: bits.position(), block_len })
 }
 
 pub(crate) fn decode_block(data: &[u8], start_bit: u64, end_bit: u64, level: u8, expected_crc: u32) -> Result<Vec<u8>> {
@@ -378,7 +393,7 @@ pub(crate) fn decode_block(data: &[u8], start_bit: u64, end_bit: u64, level: u8,
     if bits.magic()? != BLOCK_MAGIC {
         return Err(decode_error(start_bit, DecodeError::InvalidMagic));
     }
-    let (output, _) = Decoder::new().block(&mut bits, level, Some(expected_crc))?;
+    let (output, _, _) = Decoder::new().block(&mut bits, level, Some(expected_crc))?;
     if bits.position() != end_bit {
         return Err(decode_error(bits.position(), DecodeError::InvalidBlock));
     }
@@ -406,7 +421,7 @@ pub(crate) fn decode_serial(data: &[u8], output: &mut impl Write) -> Result<()> 
             let marker_offset = bits.position();
             match bits.magic()? {
                 BLOCK_MAGIC => {
-                    let (block, crc) = decoder.block(&mut bits, level, None)?;
+                    let (block, crc, _) = decoder.block(&mut bits, level, None)?;
                     output.write_all(&block)?;
                     combined_crc = combine_stream_crc(combined_crc, crc);
                 }

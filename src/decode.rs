@@ -1,19 +1,22 @@
-use std::{collections::HashMap, io::Write, sync::Arc, thread};
-
-use rayon::{ThreadPool, ThreadPoolBuilder, prelude::*};
-
-use crate::format::scan_with_pool;
-use crate::{
-    BlockCandidate, BlockIndex, DecodeError, EndCandidate, Error, Index, MAX_DECODED_BLOCK, Result, StreamIndex, combine_stream_crc, decode_block, decoder,
+use std::{
+    collections::HashMap,
+    io::Write,
+    sync::{Arc, Condvar, Mutex, mpsc},
+    thread,
 };
 
-pub const DEFAULT_MEMORY_LIMIT: usize = 512 * 1024 * 1024;
+use rayon::{ThreadPool, ThreadPoolBuilder};
+
+use crate::format::scan_with_pool;
+use crate::{BlockCandidate, BlockIndex, DecodeError, EndCandidate, Error, Index, MAX_DECODED_BLOCK, Result, StreamIndex, combine_stream_crc, decoder};
+
+pub const DEFAULT_MEMORY_LIMIT: usize = 1024 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug)]
 pub struct DecodeOptions {
     /// Zero selects the process's available parallelism.
     pub threads: usize,
-    /// Maximum decoded bytes held in the reorder window.
+    /// Maximum decoded bytes reserved for in-flight and completed speculative blocks.
     pub memory_limit: usize,
 }
 
@@ -92,6 +95,36 @@ pub fn decode_to_writer(data: &[u8], output: &mut impl Write, options: DecodeOpt
         return Err(Error::InvalidConfiguration("input contains too many speculative markers".into()));
     }
 
+    let Some(pool) = pool else {
+        let mut candidates = SerialCandidates { data, markers: &markers };
+        return assemble(data, output, &markers, &mut candidates);
+    };
+    let jobs: Vec<_> = markers
+        .iter()
+        .enumerate()
+        .filter_map(|(marker_index, marker)| match marker {
+            Marker::Block(block) => Some(CandidateJob { marker_index, start_bit: block.bit_offset, expected_crc: block.expected_crc }),
+            Marker::End(_) => None,
+        })
+        .collect();
+    let work = WorkQueue::new(options.memory_limit);
+    let (sender, receiver) = mpsc::channel();
+
+    thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            pool.broadcast(|_| worker_loop(data, &jobs, &work, &sender));
+        });
+        let result = {
+            let mut candidates = ParallelCandidates { receiver, ready: HashMap::new(), work: &work };
+            assemble(data, output, &markers, &mut candidates)
+        };
+        work.cancel();
+        worker.join().map_err(|_| Error::InvalidConfiguration("parallel decoder worker panicked".into()))?;
+        result
+    })
+}
+
+fn assemble(data: &[u8], output: &mut impl Write, markers: &[Marker], candidates: &mut impl Candidates) -> Result<Index> {
     let mut blocks = Vec::new();
     let mut streams = Vec::new();
     let mut decoded_offset = 0_u64;
@@ -104,11 +137,7 @@ pub fn decode_to_writer(data: &[u8], output: &mut impl Write, options: DecodeOpt
         let stream_decoded_start = decoded_offset;
         let mut combined_crc = 0_u32;
         let mut current_bit = header_byte.checked_mul(8).and_then(|bit| bit.checked_add(32)).ok_or_else(offset_overflow)?;
-        let mut marker_index = marker_at(&markers, current_bit)?;
-        let max_block = (usize::from(level) * 100_000 / 5 * 259 + 4).max(1);
-        let batch_size = (options.memory_limit / max_block).max(1).min(threads.saturating_mul(2).max(1));
-        let mut ready: HashMap<usize, Result<Vec<u8>>> = HashMap::new();
-
+        let mut marker_index = marker_at(markers, current_bit)?;
         loop {
             match &markers[marker_index] {
                 Marker::End(end) => {
@@ -130,26 +159,14 @@ pub fn decode_to_writer(data: &[u8], output: &mut impl Write, options: DecodeOpt
                     break;
                 }
                 Marker::Block(block) => {
-                    if ready.is_empty() {
-                        ready = decode_batch(data, &markers, marker_index, batch_size, level, pool.as_deref());
+                    let decoded = candidates.take(marker_index)?;
+                    if decoded.block_len > usize::from(level) * 100_000 {
+                        return Err(Error::Decode { bit_offset: block.bit_offset, source: DecodeError::BlockOverflow });
                     }
-                    let mut end_index = marker_index + 1;
-                    let decoded = match ready.remove(&marker_index) {
-                        Some(Ok(decoded)) => decoded,
-                        Some(Err(first_error)) => {
-                            ready.clear();
-                            match retry_merged(data, &markers, marker_index, level) {
-                                Ok((decoded, found_end)) => {
-                                    end_index = found_end;
-                                    decoded
-                                }
-                                Err(_) => return Err(first_error),
-                            }
-                        }
-                        None => return Err(required_marker(current_bit)),
-                    };
-                    output.write_all(&decoded)?;
-                    let decoded_len = decoded.len() as u64;
+                    let end_index = marker_at(markers, decoded.end_bit)?;
+                    candidates.discard_before(end_index);
+                    output.write_all(&decoded.output)?;
+                    let decoded_len = decoded.output.len() as u64;
                     blocks.push(BlockIndex {
                         compressed_start_bit: block.bit_offset,
                         compressed_end_bit: markers[end_index].bit_offset(),
@@ -162,7 +179,6 @@ pub fn decode_to_writer(data: &[u8], output: &mut impl Write, options: DecodeOpt
                     combined_crc = combine_stream_crc(combined_crc, block.expected_crc);
                     current_bit = markers[end_index].bit_offset();
                     marker_index = end_index;
-                    ready.retain(|&index, _| index >= marker_index);
                 }
             }
         }
@@ -178,32 +194,129 @@ pub fn decode_to_writer(data: &[u8], output: &mut impl Write, options: DecodeOpt
     Ok(Index::new(data, decoded_offset, streams, blocks))
 }
 
-fn decode_batch(data: &[u8], markers: &[Marker], start: usize, limit: usize, level: u8, pool: Option<&ThreadPool>) -> HashMap<usize, Result<Vec<u8>>> {
-    let end = (start + limit).min(markers.len().saturating_sub(1));
-    let jobs: Vec<_> = (start..end)
-        .take_while(|&index| matches!(markers[index], Marker::Block(_)))
-        .map(|index| {
-            let Marker::Block(block) = &markers[index] else { unreachable!() };
-            (index, block.bit_offset, markers[index + 1].bit_offset(), block.expected_crc)
-        })
-        .collect();
-    let decode = || jobs.par_iter().map(|&(index, start_bit, end_bit, crc)| (index, decode_block(data, start_bit, end_bit, level, crc))).collect();
-    match pool {
-        Some(pool) => pool.install(decode),
-        None => jobs.into_iter().map(|(index, start_bit, end_bit, crc)| (index, decode_block(data, start_bit, end_bit, level, crc))).collect(),
+trait Candidates {
+    fn take(&mut self, marker_index: usize) -> Result<decoder::DecodedCandidate>;
+    fn discard_before(&mut self, marker_index: usize);
+}
+
+struct SerialCandidates<'a> {
+    data: &'a [u8],
+    markers: &'a [Marker],
+}
+
+impl Candidates for SerialCandidates<'_> {
+    fn take(&mut self, marker_index: usize) -> Result<decoder::DecodedCandidate> {
+        let Marker::Block(block) = &self.markers[marker_index] else { return Err(required_marker(self.markers[marker_index].bit_offset())) };
+        decoder::decode_candidate(self.data, block.bit_offset, block.expected_crc)
+    }
+
+    fn discard_before(&mut self, _marker_index: usize) {}
+}
+
+#[derive(Clone, Copy)]
+struct CandidateJob {
+    marker_index: usize,
+    start_bit: u64,
+    expected_crc: u32,
+}
+
+struct WorkState {
+    next: usize,
+    reserved: usize,
+    cancelled: bool,
+}
+
+struct WorkQueue {
+    limit: usize,
+    state: Mutex<WorkState>,
+    wake: Condvar,
+}
+
+impl WorkQueue {
+    fn new(limit: usize) -> Self {
+        Self { limit, state: Mutex::new(WorkState { next: 0, reserved: 0, cancelled: false }), wake: Condvar::new() }
+    }
+
+    fn next(&self, job_count: usize) -> Option<usize> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        while state.reserved > self.limit - MAX_DECODED_BLOCK && state.next < job_count && !state.cancelled {
+            state = self.wake.wait(state).unwrap_or_else(|error| error.into_inner());
+        }
+        if state.cancelled || state.next >= job_count {
+            return None;
+        }
+        let next = state.next;
+        state.next += 1;
+        state.reserved += MAX_DECODED_BLOCK;
+        Some(next)
+    }
+
+    fn complete(&self, decoded_len: usize) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.reserved -= MAX_DECODED_BLOCK - decoded_len;
+        self.wake.notify_all();
+    }
+
+    fn retire(&self, decoded_len: usize) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.reserved -= decoded_len;
+        self.wake.notify_all();
+    }
+
+    fn cancel(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.cancelled = true;
+        self.wake.notify_all();
     }
 }
 
-fn retry_merged(data: &[u8], markers: &[Marker], start: usize, level: u8) -> Result<(Vec<u8>, usize)> {
-    let Marker::Block(block) = &markers[start] else { return Err(required_marker(markers[start].bit_offset())) };
-    let mut last_error = None;
-    for (end, marker) in markers.iter().enumerate().skip(start + 2) {
-        match decode_block(data, block.bit_offset, marker.bit_offset(), level, block.expected_crc) {
-            Ok(decoded) => return Ok((decoded, end)),
-            Err(error) => last_error = Some(error),
+type CandidateResult = (usize, Result<decoder::DecodedCandidate>);
+
+fn worker_loop(data: &[u8], jobs: &[CandidateJob], work: &WorkQueue, sender: &mpsc::Sender<CandidateResult>) {
+    while let Some(index) = work.next(jobs.len()) {
+        let job = jobs[index];
+        let result = decoder::decode_candidate(data, job.start_bit, job.expected_crc);
+        let decoded_len = candidate_len(&result);
+        work.complete(decoded_len);
+        if sender.send((job.marker_index, result)).is_err() {
+            work.retire(decoded_len);
+            return;
         }
     }
-    Err(last_error.unwrap_or_else(|| required_marker(block.bit_offset)))
+}
+
+fn candidate_len(result: &Result<decoder::DecodedCandidate>) -> usize {
+    result.as_ref().map_or(0, |decoded| decoded.output.len())
+}
+
+struct ParallelCandidates<'a> {
+    receiver: mpsc::Receiver<CandidateResult>,
+    ready: HashMap<usize, Result<decoder::DecodedCandidate>>,
+    work: &'a WorkQueue,
+}
+
+impl Candidates for ParallelCandidates<'_> {
+    fn take(&mut self, marker_index: usize) -> Result<decoder::DecodedCandidate> {
+        while !self.ready.contains_key(&marker_index) {
+            let (index, result) = self.receiver.recv().map_err(|_| Error::InvalidConfiguration("parallel decoder stopped early".into()))?;
+            if index < marker_index {
+                self.work.retire(candidate_len(&result));
+            } else {
+                self.ready.insert(index, result);
+            }
+        }
+        let result = self.ready.remove(&marker_index).unwrap();
+        self.work.retire(candidate_len(&result));
+        result
+    }
+
+    fn discard_before(&mut self, marker_index: usize) {
+        let stale: Vec<_> = self.ready.keys().copied().filter(|&index| index < marker_index).collect();
+        for index in stale {
+            let result = self.ready.remove(&index).unwrap();
+            self.work.retire(candidate_len(&result));
+        }
+    }
 }
 
 fn thread_pool(threads: usize) -> Result<Option<Arc<ThreadPool>>> {
@@ -290,6 +403,19 @@ mod tests {
         assert_eq!(index.streams.len(), 2);
         assert_eq!(index.decoded_len, expected.len() as u64);
         assert!(index.blocks.len() >= 3);
+    }
+
+    #[test]
+    fn bounded_scheduler_crosses_many_short_streams() {
+        let mut compressed = Vec::new();
+        let mut expected = Vec::new();
+        for stream in 0..32 {
+            let plain = patterned(4_000 + stream * 31);
+            compressed.extend_from_slice(&compress(&plain, Level::BEST));
+            expected.extend_from_slice(&plain);
+        }
+        let options = DecodeOptions { threads: 4, memory_limit: MAX_DECODED_BLOCK * 2 };
+        assert_eq!(decompress(&compressed, options).unwrap(), expected);
     }
 
     #[test]

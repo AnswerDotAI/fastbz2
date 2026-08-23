@@ -27,7 +27,7 @@ enum Command {
         stdout: bool,
         #[arg(short = 'P', long, default_value_t = 0)]
         threads: usize,
-        #[arg(long, default_value = "512M", value_parser = parse_size)]
+        #[arg(long, default_value = "1G", value_parser = parse_size)]
         memory_limit: usize,
         #[arg(short, long)]
         force: bool,
@@ -37,7 +37,7 @@ enum Command {
         input: String,
         #[arg(short = 'P', long, default_value_t = 0)]
         threads: usize,
-        #[arg(long, default_value = "512M", value_parser = parse_size)]
+        #[arg(long, default_value = "1G", value_parser = parse_size)]
         memory_limit: usize,
     },
     /// Build a validated, source-bound block index.
@@ -47,7 +47,7 @@ enum Command {
         output: Option<PathBuf>,
         #[arg(short = 'P', long, default_value_t = 0)]
         threads: usize,
-        #[arg(long, default_value = "512M", value_parser = parse_size)]
+        #[arg(long, default_value = "1G", value_parser = parse_size)]
         memory_limit: usize,
         #[arg(short, long)]
         force: bool,
@@ -57,7 +57,7 @@ enum Command {
         input: PathBuf,
         #[arg(short = 'P', long, default_value_t = 0)]
         threads: usize,
-        #[arg(long, default_value = "512M", value_parser = parse_size)]
+        #[arg(long, default_value = "1G", value_parser = parse_size)]
         memory_limit: usize,
     },
 }
@@ -80,7 +80,7 @@ fn run(cli: Cli) -> fastbz2::Result<()> {
                 if stdout || output.is_none() {
                     return decode_stdin(&mut io::stdout().lock());
                 }
-                return atomic_write(output.as_ref().unwrap(), force, |writer| decode_stdin(writer));
+                return atomic_write(output.as_ref().unwrap(), force, decode_stdin);
             }
             let input_path = Path::new(&input);
             let source = Source::open(input_path)?;

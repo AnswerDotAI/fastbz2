@@ -31,7 +31,7 @@ rayon = "1.12.0"
 tempfile = "3.27.0"
 
 [dev-dependencies]
-crabz2 = "0.4.0"
+crabz2 = { version = "0.4.0", features = ["parallel"] }
 libbz2-rs-sys = { version = "0.2.5", default-features = false, features = ["std"] }
 
 [features]
