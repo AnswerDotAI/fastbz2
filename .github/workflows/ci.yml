@@ -41,7 +41,7 @@ jobs:
           python tools/stage_binaries.py
       - uses: PyO3/maturin-action@v1
         with:
-          args: --release --out dist -i python3.10 -i python3.11 -i python3.12 -i python3.13
+          args: --release --out dist -i python3.10 -i python3.11 -i python3.12 -i python3.13 -i python3.14
           manylinux: auto
           before-script-linux: cargo build --release --bins && python3.10 tools/stage_binaries.py
       - uses: actions/upload-artifact@v7
@@ -53,11 +53,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
       - run: mkdir -p target/wheel-data
       - uses: PyO3/maturin-action@v1
         with:
           command: sdist
           args: -o dist
+      - run: |
+          python -m venv /tmp/fastbz2-sdist-test
+          /tmp/fastbz2-sdist-test/bin/pip install pytest dist/*.tar.gz
+          /tmp/fastbz2-sdist-test/bin/pytest tests/test_install.py
       - uses: actions/upload-artifact@v7
         with:
           name: wheels-sdist

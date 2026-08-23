@@ -16,6 +16,7 @@ src/indexed.rs         seekable decoded view and block cache
 src/lib.rs            public Rust API and private PyO3 binding
 src/source.rs         owned and memory-mapped compressed sources
 python/fastbz2/       thin Python I/O wrapper over fastbz2._core
+build_backend.py      stage the native CLI for PEP 517 wheel builds
 tests/corpus/         selected upstream conformance and corruption fixtures
 tests/                Rust CLI/corpus and Python API integration tests
 tools/stage_binaries.py copy the release executable into Maturin wheel data
@@ -75,6 +76,8 @@ CI tests and builds Linux on x86-64 and ARM64, and macOS on ARM64. macOS Intel r
 ## Versioning
 
 The canonical version lives in `Cargo.toml`. `pyproject.toml` gets the Python package version from Cargo via `dynamic = ["version"]`.
+
+The thin PEP 517 backend delegates to Maturin after building and staging the native executable. This makes wheels built from the sdist contain the same native CLI as CI-built wheels. Release CI verifies that path from a fresh Python 3.14 environment before publishing.
 
 ## Release
 
