@@ -26,6 +26,8 @@ The current scanner deliberately does not treat 48-bit marker matches or later `
 
 The decoder remains independent of files, threads, Python, and the CLI. Parallel scanning/decoding and indexed seeking are layered over it. Native workers never call Python. Large offsets use explicit 64-bit bit/byte types, and speculative block-marker hits are accepted only when they form an exact stream chain with valid block and combined stream CRCs.
 
+The core decode APIs can report completed compressed and decoded byte counts without knowing anything about terminals. The CLI layers delayed, rate-limited TTY progress rendering over those callbacks; redirected stderr and `--quiet` produce no progress output. Decoded files use same-directory temporary files and atomic persistence, then inherit the compressed input's modification time and permissions. `--rm` removes an input only after decode, persistence, and metadata copying all succeed. Output-size limits are enforced by a writer wrapper, so the decoder has one code path for files, stdout, validation, and indexing.
+
 Parallel decoding uses a rolling candidate queue rather than stopping at stream boundaries or waiting for fixed batches. Workers reserve the maximum possible decoded block size before starting; once a block finishes, that conservative reservation shrinks to its actual output size and is released when ordered validation consumes or rejects it. Thus the `memory_limit` bounds speculative decoded output while short multistream inputs can keep the worker pool busy. The 1 GiB default admits one worst-case block per worker on the primary 18-core machine.
 
 The production decoder is safe scalar Rust designed for LLVM auto-vectorisation. Huffman decoding uses a 4096-entry direct table for codes up to 12 bits and canonical fallback for longer codes. Add narrowly scoped unsafe or architecture-specific SIMD only after profiling; `libbz2-rs-sys` remains the dev-only differential oracle.
@@ -117,7 +119,7 @@ Line 1000 is the start of stream 1001 because byte zero is stream 1 and is absen
 To create the separately useful well-formed parser fixture, append only the XML root close after decoding; those 13 bytes are deliberately excluded from `ENWIKI_1000_LEN`:
 
 ```bash
-fastbz2 decode "$wiki/data/enwiki-first-1000-streams.xml.bz2" -o "$wiki/data/enwiki-first-1000-streams.xml"
+fastbz2 "$wiki/data/enwiki-first-1000-streams.xml.bz2" -o "$wiki/data/enwiki-first-1000-streams.xml"
 printf '</mediawiki>\n' >> "$wiki/data/enwiki-first-1000-streams.xml"
 xmllint --stream --noout "$wiki/data/enwiki-first-1000-streams.xml"
 ```

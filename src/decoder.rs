@@ -401,8 +401,13 @@ pub(crate) fn decode_block(data: &[u8], start_bit: u64, end_bit: u64, level: u8,
 }
 
 pub(crate) fn decode_serial(data: &[u8], output: &mut impl Write) -> Result<()> {
+    decode_serial_with_progress(data, output, &mut |_, _| {})
+}
+
+pub(crate) fn decode_serial_with_progress(data: &[u8], output: &mut impl Write, progress: &mut impl FnMut(u64, u64)) -> Result<()> {
     let mut bits = Bits::at(data, 0)?;
     let mut decoder = Decoder::new();
+    let mut decoded_bytes = 0_u64;
     while bits.remaining() != 0 {
         bits.align_byte();
         if bits.remaining() < 32 {
@@ -423,6 +428,9 @@ pub(crate) fn decode_serial(data: &[u8], output: &mut impl Write) -> Result<()> 
                 BLOCK_MAGIC => {
                     let (block, crc, _) = decoder.block(&mut bits, level, None)?;
                     output.write_all(&block)?;
+                    decoded_bytes =
+                        decoded_bytes.checked_add(block.len() as u64).ok_or_else(|| Error::InvalidConfiguration("decoded offset overflow".into()))?;
+                    progress(bits.position().div_ceil(8), decoded_bytes);
                     combined_crc = combine_stream_crc(combined_crc, crc);
                 }
                 END_MAGIC => {
@@ -437,6 +445,7 @@ pub(crate) fn decode_serial(data: &[u8], output: &mut impl Write) -> Result<()> 
         bits.align_byte();
     }
     output.flush()?;
+    progress(data.len() as u64, decoded_bytes);
     Ok(())
 }
 
