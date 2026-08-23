@@ -1,0 +1,25 @@
+[package]
+name = "fastbz2"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+license = "Apache-2.0"
+description = "Fast parallel and indexed bzip2 decompression for Rust and Python"
+repository = "https://github.com/AnswerDotAI/fastbz2"
+homepage = "https://github.com/AnswerDotAI/fastbz2"
+documentation = "https://github.com/AnswerDotAI/fastbz2"
+
+[lib]
+name = "fastbz2"
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+lto = true
+codegen-units = 1
+
+[dependencies]
+pyo3 = { version = ">=0.28", optional = true }
+
+[features]
+python = ["dep:pyo3"]
+extension-module = ["python", "pyo3/extension-module"]

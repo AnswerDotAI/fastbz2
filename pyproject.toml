@@ -1,0 +1,38 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "fastbz2"
+dynamic = ["version"]
+description = "Fast parallel and indexed bzip2 decompression for Rust and Python"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+readme = "README.md"
+authors = [{name = "Jeremy Howard", email = "github@jhoward.fastmail.fm"}]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+
+[project.optional-dependencies]
+dev = ["fastship>=0.0.11", "maturin>=1.0,<2.0", "pytest"]
+
+[project.urls]
+Homepage = "https://github.com/AnswerDotAI/fastbz2"
+Repository = "https://github.com/AnswerDotAI/fastbz2"
+Issues = "https://github.com/AnswerDotAI/fastbz2/issues"
+
+[tool.maturin]
+features = ["extension-module"]
+python-source = "python"
+module-name = "fastbz2._core"
+
+[tool.uv]
+cache-keys = [{ file = "pyproject.toml" }, { file = "src/**/*.rs" }, { file = "Cargo.toml" }, { file = "Cargo.lock" }]
+
+[tool.fastship]
+branch = "main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
