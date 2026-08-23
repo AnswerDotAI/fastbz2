@@ -15,11 +15,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo test
+      - run: cargo test --release
       - run: cargo check --all-features
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
+      - run: cargo build --release --bins
+      - run: python tools/stage_binaries.py
       - run: pip install -e '.[dev]'
       - run: pytest -q
 
@@ -31,10 +33,17 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Stage native binary
+        if: runner.os != 'Linux'
+        run: |
+          cargo build --release --bins
+          python tools/stage_binaries.py
       - uses: PyO3/maturin-action@v1
         with:
           args: --release --out dist -i python3.10 -i python3.11 -i python3.12 -i python3.13
           manylinux: auto
+          before-script-linux: cargo build --release --bins && python3.10 tools/stage_binaries.py
       - uses: actions/upload-artifact@v7
         with:
           name: wheels-${{ matrix.os }}
