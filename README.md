@@ -6,7 +6,16 @@ Fast parallel and indexed bzip2 decompression for Rust and Python.
 
 The first performance target is end-to-end throughput within 20% of `librapidarchive`'s `indexed_bzip2` on the same host and input. Portable, SIMD-friendly Rust comes first; architecture-specific SIMD is added only when profiles justify it.
 
-The decoder is not implemented yet.
+The first implemented layer is a safe, portable MSB-first bit reader, bzip2 CRC primitives, and a structural scanner for stream headers and non-byte-aligned block/end markers. The scanner reports candidates rather than claiming validation: the decoder, exact stream-chain validation, indexing, parallel scheduler, CLI, and seekable Python file API are not implemented yet.
+
+```python
+import bz2
+from fastbz2 import scan
+
+result = scan(bz2.compress(b"hello"))
+result.blocks[0].bit_offset
+# 32
+```
 
 ## Inspiration and credit
 
