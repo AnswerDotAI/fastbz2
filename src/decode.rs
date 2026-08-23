@@ -12,6 +12,12 @@ use crate::{BlockCandidate, BlockIndex, DecodeError, EndCandidate, Error, Index,
 
 pub const DEFAULT_MEMORY_LIMIT: usize = 1024 * 1024 * 1024;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DecodeProgress {
+    pub compressed_bytes: u64,
+    pub decoded_bytes: u64,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct DecodeOptions {
     /// Zero selects the process's available parallelism.
@@ -69,19 +75,43 @@ pub fn decompress(data: &[u8], options: DecodeOptions) -> Result<Vec<u8>> {
 /// Decode to a streaming output. A one-thread request uses the same pure-Rust
 /// block codec without the indexing/speculation overhead.
 pub fn decompress_to_writer(data: &[u8], output: &mut impl Write, options: DecodeOptions) -> Result<()> {
+    decompress_to_writer_with_progress(data, output, options, |_| {})
+}
+
+pub fn decompress_to_writer_with_progress(
+    data: &[u8],
+    output: &mut impl Write,
+    options: DecodeOptions,
+    mut progress: impl FnMut(DecodeProgress),
+) -> Result<()> {
     let options = options.validate()?;
     if options.resolved_threads() == 1 {
-        return decoder::decode_serial(data, output);
+        return decoder::decode_serial_with_progress(data, output, &mut |compressed_bytes, decoded_bytes| {
+            progress(DecodeProgress { compressed_bytes, decoded_bytes });
+        });
     }
-    decode_to_writer(data, output, options).map(|_| ())
+    decode_to_writer_impl(data, output, options, &mut progress).map(|_| ())
 }
 
 pub fn build_index(data: &[u8], options: DecodeOptions) -> Result<Index> {
-    decode_to_writer(data, &mut std::io::sink(), options)
+    build_index_with_progress(data, options, |_| {})
+}
+
+pub fn build_index_with_progress(data: &[u8], options: DecodeOptions, mut progress: impl FnMut(DecodeProgress)) -> Result<Index> {
+    decode_to_writer_impl(data, &mut std::io::sink(), options, &mut progress)
 }
 
 /// Decode a complete bzip2 input, validate every CRC, and build its block index.
 pub fn decode_to_writer(data: &[u8], output: &mut impl Write, options: DecodeOptions) -> Result<Index> {
+    decode_to_writer_impl(data, output, options, &mut |_| {})
+}
+
+/// Decode a complete bzip2 input, return its index, and report completed work.
+pub fn decode_to_writer_with_progress(data: &[u8], output: &mut impl Write, options: DecodeOptions, mut progress: impl FnMut(DecodeProgress)) -> Result<Index> {
+    decode_to_writer_impl(data, output, options, &mut progress)
+}
+
+fn decode_to_writer_impl(data: &[u8], output: &mut impl Write, options: DecodeOptions, progress: &mut impl FnMut(DecodeProgress)) -> Result<Index> {
     let options = options.validate()?;
     let threads = options.resolved_threads();
     let pool = thread_pool(threads)?;
@@ -97,7 +127,7 @@ pub fn decode_to_writer(data: &[u8], output: &mut impl Write, options: DecodeOpt
 
     let Some(pool) = pool else {
         let mut candidates = SerialCandidates { data, markers: &markers };
-        return assemble(data, output, &markers, &mut candidates);
+        return assemble(data, output, &markers, &mut candidates, progress);
     };
     let jobs: Vec<_> = markers
         .iter()
@@ -116,7 +146,7 @@ pub fn decode_to_writer(data: &[u8], output: &mut impl Write, options: DecodeOpt
         });
         let result = {
             let mut candidates = ParallelCandidates { receiver, ready: HashMap::new(), work: &work };
-            assemble(data, output, &markers, &mut candidates)
+            assemble(data, output, &markers, &mut candidates, progress)
         };
         work.cancel();
         worker.join().map_err(|_| Error::InvalidConfiguration("parallel decoder worker panicked".into()))?;
@@ -124,7 +154,13 @@ pub fn decode_to_writer(data: &[u8], output: &mut impl Write, options: DecodeOpt
     })
 }
 
-fn assemble(data: &[u8], output: &mut impl Write, markers: &[Marker], candidates: &mut impl Candidates) -> Result<Index> {
+fn assemble(
+    data: &[u8],
+    output: &mut impl Write,
+    markers: &[Marker],
+    candidates: &mut impl Candidates,
+    progress: &mut impl FnMut(DecodeProgress),
+) -> Result<Index> {
     let mut blocks = Vec::new();
     let mut streams = Vec::new();
     let mut decoded_offset = 0_u64;
@@ -176,6 +212,7 @@ fn assemble(data: &[u8], output: &mut impl Write, markers: &[Marker], candidates
                         stream: stream_number,
                     });
                     decoded_offset = decoded_offset.checked_add(decoded_len).ok_or_else(offset_overflow)?;
+                    progress(DecodeProgress { compressed_bytes: decoded.end_bit.div_ceil(8), decoded_bytes: decoded_offset });
                     combined_crc = combine_stream_crc(combined_crc, block.expected_crc);
                     current_bit = markers[end_index].bit_offset();
                     marker_index = end_index;
@@ -191,6 +228,7 @@ fn assemble(data: &[u8], output: &mut impl Write, markers: &[Marker], candidates
     }
 
     output.flush()?;
+    progress(DecodeProgress { compressed_bytes: data.len() as u64, decoded_bytes: decoded_offset });
     Ok(Index::new(data, decoded_offset, streams, blocks))
 }
 
@@ -385,6 +423,21 @@ mod tests {
         for threads in [1, 2, 4, 0] {
             let options = DecodeOptions { threads, ..DecodeOptions::default() };
             assert_eq!(decompress(&compressed, options).unwrap(), plain);
+        }
+    }
+
+    #[test]
+    fn progress_reaches_exact_input_and_output_lengths() {
+        let plain = patterned(350_000);
+        let compressed = compress(&plain, Level::FASTEST);
+        for threads in [1, 4] {
+            let options = DecodeOptions { threads, ..DecodeOptions::default() };
+            let mut output = Vec::new();
+            let mut reports = Vec::new();
+            decompress_to_writer_with_progress(&compressed, &mut output, options, |progress| reports.push(progress)).unwrap();
+            assert_eq!(output, plain);
+            assert!(reports.windows(2).all(|pair| { pair[0].compressed_bytes <= pair[1].compressed_bytes && pair[0].decoded_bytes <= pair[1].decoded_bytes }));
+            assert_eq!(reports.last(), Some(&DecodeProgress { compressed_bytes: compressed.len() as u64, decoded_bytes: plain.len() as u64 }));
         }
     }
 
