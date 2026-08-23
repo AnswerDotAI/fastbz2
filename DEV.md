@@ -26,6 +26,8 @@ The current scanner deliberately does not treat 48-bit marker matches or later `
 
 The decoder remains independent of files, threads, Python, and the CLI. Parallel scanning/decoding and indexed seeking are layered over it. Native workers never call Python. Large offsets use explicit 64-bit bit/byte types, and speculative block-marker hits are accepted only when they form an exact stream chain with valid block and combined stream CRCs.
 
+Parallel decoding uses a rolling candidate queue rather than stopping at stream boundaries or waiting for fixed batches. Workers reserve the maximum possible decoded block size before starting; once a block finishes, that conservative reservation shrinks to its actual output size and is released when ordered validation consumes or rejects it. Thus the `memory_limit` bounds speculative decoded output while short multistream inputs can keep the worker pool busy. The 1 GiB default admits one worst-case block per worker on the primary 18-core machine.
+
 The production decoder is safe scalar Rust designed for LLVM auto-vectorisation. Huffman decoding uses a 4096-entry direct table for codes up to 12 bits and canonical fallback for longer codes. Add narrowly scoped unsafe or architecture-specific SIMD only after profiling; `libbz2-rs-sys` remains the dev-only differential oracle.
 
 ## Commands
@@ -51,7 +53,7 @@ The same test binary contains a warmed end-to-end performance regression gate ca
 
 Legacy randomized blocks produced by bzip2 versions before 0.9.5 are intentionally unsupported. Supporting that obsolete format would add complexity to the production decoder for data that is not realistically encountered today.
 
-### Local SimpleWiki benchmark
+### Local Wikipedia benchmarks
 
 `tests/wiki_perf.rs` contains a release-only local benchmark that is skipped by default. Its git-ignored fixture is a single bzip2 stream containing the first 84,423,012 decoded bytes (about 5%) of SimpleWiki, stored at `meta/simplewiki-first-5pct.xml.bz2`. Run it with:
 
@@ -68,6 +70,57 @@ cargo test --release --test wiki_perf simplewiki_full -- --ignored --nocapture
 ```
 
 The full test streams decoded bytes into a counting sink and validates every block and stream CRC. Stream headers found during the structural scan remain speculative: only the exact byte-aligned header following a validated end-of-stream marker starts another stream.
+
+The 1,000-stream enwiki comparison has a separate ignored test for each implementation and mode so a changed decoder can be measured without rerunning unchanged baselines. Each test reads the compressed fixture before starting its single timed decode, with no warmups or repeats:
+
+```bash
+cargo test --release --test wiki_perf enwiki_first_1000_fastbz2_parallel -- --ignored --exact --nocapture
+cargo test --release --test wiki_perf enwiki_first_1000_crabz2_parallel -- --ignored --exact --nocapture
+cargo test --release --test wiki_perf enwiki_first_1000_fastbz2_serial -- --ignored --exact --nocapture
+cargo test --release --test wiki_perf enwiki_first_1000_crabz2_serial -- --ignored --exact --nocapture
+```
+
+It compares fastbz2 and crabz2 in parallel and serial modes. Set `FASTBZ2_THREADS` to give both parallel decoders an explicit thread count. Each implementation validates the bzip2 CRCs; the benchmark also checks the exact decoded length.
+
+The decoded lengths and the 5% BLAKE3 in `tests/wiki_perf.rs` are acceptance values, not parameters used by the decoder. They prevent a truncated decode from appearing artificially fast without reading a separate multi-gigabyte reference during each timed run. Regenerating a fixture requires independently validating it and updating the corresponding acceptance value.
+
+#### Regenerating the fixtures
+
+Set `wiki` to the checkout containing the Wikimedia dumps:
+
+```bash
+wiki=/path/to/wiki2md
+```
+
+Recreate the SimpleWiki fixtures from its validated compressed and decoded files:
+
+```bash
+head -c 84423012 "$wiki/data/simplewiki-latest-pages-articles.xml" | bzip2 -9c > meta/simplewiki-first-5pct.xml.bz2
+ln -s "$wiki/data/simplewiki-latest-pages-articles.xml.bz2" meta/simplewiki-full.xml.bz2
+```
+
+Run the 5% test to obtain and verify its decoded length and BLAKE3. Obtain the full decoded length with `stat`; update `FIVE_PERCENT_LEN`, `FIVE_PERCENT_BLAKE3`, or `FULL_LEN` only when intentionally changing a fixture.
+
+The enwiki dump is multistream. Extract its unique compressed stream offsets from the official index, whose first page-bearing stream begins after an unindexed initial stream at byte zero:
+
+```bash
+bzcat "$wiki/data/enwiki-latest-pages-articles-multistream-index.txt.bz2" \
+  | awk -F: '!seen[$1]++ {print $1}' > "$wiki/meta/enwiki-multistream-offsets.txt"
+boundary=$(sed -n '1000p' "$wiki/meta/enwiki-multistream-offsets.txt")
+head -c "$boundary" "$wiki/data/enwiki-latest-pages-articles-multistream.xml.bz2" \
+  > "$wiki/data/enwiki-first-1000-streams.xml.bz2"
+ln -s "$wiki/data/enwiki-first-1000-streams.xml.bz2" meta/enwiki-first-1000-streams.xml.bz2
+```
+
+Line 1000 is the start of stream 1001 because byte zero is stream 1 and is absent from the page index. Thus `[0, boundary)` contains exactly 1,000 complete bzip2 streams. For the 2026-08-01 dump, `boundary` is `654362682` and the decoded bzip2 payload length is `2715335085`.
+
+To create the separately useful well-formed parser fixture, append only the XML root close after decoding; those 13 bytes are deliberately excluded from `ENWIKI_1000_LEN`:
+
+```bash
+fastbz2 decode "$wiki/data/enwiki-first-1000-streams.xml.bz2" -o "$wiki/data/enwiki-first-1000-streams.xml"
+printf '</mediawiki>\n' >> "$wiki/data/enwiki-first-1000-streams.xml"
+xmllint --stream --noout "$wiki/data/enwiki-first-1000-streams.xml"
+```
 
 ## Platforms
 
