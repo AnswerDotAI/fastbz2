@@ -1,10 +1,14 @@
 use crate::{BitReader, Error, Result};
+use rayon::{ThreadPool, prelude::*};
 
 pub const BLOCK_MAGIC: u64 = 0x3141_5926_5359;
 pub const END_MAGIC: u64 = 0x1772_4538_5090;
 const MAGIC_BITS: u8 = 48;
 const MAGIC_MASK: u64 = (1_u64 << MAGIC_BITS) - 1;
 const WINDOW_MASK: u64 = (1_u64 << 56) - 1;
+const SCAN_CHUNK: usize = 1 << 20;
+const BLOCK_PREFIX: [u8; 256] = prefix_table(BLOCK_MAGIC);
+const END_PREFIX: [u8; 256] = prefix_table(END_MAGIC);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StreamHeaderCandidate {
@@ -42,24 +46,44 @@ pub fn scan(data: &[u8]) -> Result<ScanResult> {
     if !is_stream_header(data, 0) {
         return Err(Error::InvalidStreamHeader);
     }
+    Ok(scan_range(data, 0, data.len()))
+}
 
-    let streams = (0..=data.len().saturating_sub(4))
+pub(crate) fn scan_with_pool(data: &[u8], pool: Option<&ThreadPool>) -> Result<ScanResult> {
+    if !is_stream_header(data, 0) {
+        return Err(Error::InvalidStreamHeader);
+    }
+    let Some(pool) = pool.filter(|_| data.len() > SCAN_CHUNK) else { return Ok(scan_range(data, 0, data.len())) };
+    let chunks = data.len().div_ceil(SCAN_CHUNK);
+    let partial: Vec<_> =
+        pool.install(|| (0..chunks).into_par_iter().map(|chunk| scan_range(data, chunk * SCAN_CHUNK, ((chunk + 1) * SCAN_CHUNK).min(data.len()))).collect());
+    let mut result = ScanResult { streams: Vec::new(), blocks: Vec::new(), stream_ends: Vec::new() };
+    for mut chunk in partial {
+        result.streams.append(&mut chunk.streams);
+        result.blocks.append(&mut chunk.blocks);
+        result.stream_ends.append(&mut chunk.stream_ends);
+    }
+    Ok(result)
+}
+
+fn scan_range(data: &[u8], start: usize, end: usize) -> ScanResult {
+    let streams = (start..end)
         .filter(|&offset| is_stream_header(data, offset))
         .map(|offset| StreamHeaderCandidate { byte_offset: offset as u64, block_size_100k: data[offset + 3] - b'0' })
         .collect();
     let mut blocks = Vec::new();
     let mut stream_ends = Vec::new();
 
-    if data.len() < 7 {
-        return Ok(ScanResult { streams, blocks, stream_ends });
+    if data.len() < 7 || start >= end {
+        return ScanResult { streams, blocks, stream_ends };
     }
 
-    // A 56-bit rolling window contains all eight 48-bit candidates beginning
-    // in one byte. The simple fixed-width inner loop is intentionally friendly
-    // to unrolling and auto-vectorisation on both x86-64 and ARM64.
-    let mut window = data[..7].iter().fold(0_u64, |word, &byte| (word << 8) | u64::from(byte));
-    for byte_offset in 0..=data.len() - 7 {
-        for shift in 0..8_u32 {
+    let mut window = (start..start + 7).fold(0_u64, |word, offset| (word << 8) | u64::from(byte_at(data, offset)));
+    for byte_offset in start..end {
+        let mut shifts = BLOCK_PREFIX[(window >> 48) as usize] | END_PREFIX[(window >> 48) as usize];
+        while shifts != 0 {
+            let shift = shifts.trailing_zeros();
+            shifts &= shifts - 1;
             let marker = (window >> (8 - shift)) & MAGIC_MASK;
             let bit_offset = byte_offset as u64 * 8 + u64::from(shift);
             if marker == BLOCK_MAGIC {
@@ -72,12 +96,32 @@ pub fn scan(data: &[u8]) -> Result<ScanResult> {
                 stream_ends.push(end);
             }
         }
-        if let Some(&next) = data.get(byte_offset + 7) {
-            window = ((window << 8) & WINDOW_MASK) | u64::from(next);
-        }
+        window = ((window << 8) & WINDOW_MASK) | u64::from(byte_at(data, byte_offset + 7));
     }
 
-    Ok(ScanResult { streams, blocks, stream_ends })
+    ScanResult { streams, blocks, stream_ends }
+}
+
+const fn prefix_table(magic: u64) -> [u8; 256] {
+    let mut table = [0_u8; 256];
+    let mut byte = 0_usize;
+    while byte < 256 {
+        let mut shift = 0_u32;
+        while shift < 8 {
+            let wanted = (magic >> (40 + shift)) as u8;
+            let kept = ((1_u16 << (8 - shift)) - 1) as u8;
+            if byte as u8 & kept == wanted {
+                table[byte] |= 1 << shift;
+            }
+            shift += 1;
+        }
+        byte += 1;
+    }
+    table
+}
+
+fn byte_at(data: &[u8], offset: usize) -> u8 {
+    data.get(offset).copied().unwrap_or(0)
 }
 
 fn is_stream_header(data: &[u8], offset: usize) -> bool {
@@ -137,6 +181,6 @@ mod tests {
 
     #[test]
     fn rejects_non_bzip_input() {
-        assert_eq!(scan(b"not bzip2"), Err(Error::InvalidStreamHeader));
+        assert!(matches!(scan(b"not bzip2"), Err(Error::InvalidStreamHeader)));
     }
 }
