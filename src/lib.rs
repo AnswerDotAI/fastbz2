@@ -7,8 +7,10 @@ mod decode;
 mod decoder;
 mod error;
 mod format;
+pub mod gzip;
 mod index;
 mod indexed;
+mod pipeline;
 mod source;
 
 pub use bitreader::BitReader;

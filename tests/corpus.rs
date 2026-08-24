@@ -1,3 +1,7 @@
+#[cfg(not(debug_assertions))]
+#[path = "common/benchmark.rs"]
+mod benchmark;
+
 use std::{
     ffi::{c_char, c_uint},
     fs,
@@ -128,16 +132,6 @@ fn generated_shapes_match_oracle() {
     }
 }
 
-#[cfg(not(debug_assertions))]
-fn elapsed(repeats: usize, mut decode: impl FnMut()) -> std::time::Duration {
-    decode();
-    let start = std::time::Instant::now();
-    for _ in 0..repeats {
-        decode()
-    }
-    start.elapsed()
-}
-
 #[test]
 #[cfg(not(debug_assertions))]
 fn performance_regression_stays_bounded() {
@@ -145,10 +139,10 @@ fn performance_regression_stays_bounded() {
     let plain = source.repeat(2);
     let encoded = compress(&plain, Level::FASTEST);
     let repeats = 3;
-    let fastbz2_time = elapsed(repeats, || {
+    let fastbz2_time = benchmark::elapsed(repeats, || {
         std::hint::black_box(decompress(&encoded, DecodeOptions { threads: 2, ..DecodeOptions::default() }).unwrap());
     });
-    let oracle_time = elapsed(repeats, || {
+    let oracle_time = benchmark::elapsed(repeats, || {
         std::hint::black_box(oracle_decompress(&encoded).unwrap());
     });
     assert!(fastbz2_time.as_secs_f64() <= oracle_time.as_secs_f64() * 1.3, "fastbz2 {fastbz2_time:?} exceeded 1.3x oracle {oracle_time:?}");

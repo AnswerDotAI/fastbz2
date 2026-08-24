@@ -1,7 +1,11 @@
+mod common;
+
 use std::{
+    ffi::OsStr,
     fs,
     io::{self, Write},
     path::Path,
+    process::{Command, Stdio},
     time::{Duration, Instant},
 };
 
@@ -32,6 +36,41 @@ fn corpus_path(name: &str) -> std::path::PathBuf {
 
 fn requested_threads() -> usize {
     std::env::var("FASTBZ2_THREADS").ok().map(|value| value.parse().expect("FASTBZ2_THREADS must be an integer")).unwrap_or(0)
+}
+
+fn physical_footprint_mib(metrics: &common::ProcessMetrics) -> f64 {
+    metrics.peak_phys_footprint_bytes.map_or(f64::NAN, |bytes| bytes as f64 / (1024.0 * 1024.0))
+}
+
+fn validation_command(binary: impl AsRef<OsStr>, path: &Path, threads: usize) -> Command {
+    let mut command = Command::new(binary);
+    command.arg("--test").arg("-P").arg(threads.to_string()).arg(path);
+    command
+}
+
+fn quiet_validation_command(binary: impl AsRef<OsStr>, path: &Path, threads: usize) -> Command {
+    let mut command = validation_command(binary, path, threads);
+    command.stdout(Stdio::null()).stderr(Stdio::null());
+    command
+}
+
+fn warm_validation(binary: impl AsRef<OsStr>, path: &Path, threads: usize) {
+    assert!(quiet_validation_command(binary, path, threads).status().unwrap().success());
+}
+
+fn timed_validation(binary: impl AsRef<OsStr>, path: &Path, threads: usize) -> common::Timing {
+    common::measure_timing(&mut quiet_validation_command(binary, path, threads)).unwrap()
+}
+
+fn print_process_metrics(label: &str, metrics: &common::ProcessMetrics) {
+    eprintln!(
+        "{label}: wall {:.3}s, CPU {:.3}s user + {:.3}s system, peak RSS {:.1} MiB, peak physical footprint {:.1} MiB",
+        metrics.wall.as_secs_f64(),
+        metrics.user.as_secs_f64(),
+        metrics.system.as_secs_f64(),
+        metrics.peak_rss_bytes as f64 / (1024.0 * 1024.0),
+        physical_footprint_mib(metrics),
+    );
 }
 
 fn timed_fastbz2(path: &Path, threads: usize) -> Duration {
@@ -72,6 +111,81 @@ fn simplewiki_full() {
 
     let elapsed = timed_fastbz2(&path, options.threads);
     eprintln!("fastbz2 ({} threads): {elapsed:.3?}", options.resolved_threads());
+}
+
+#[test]
+#[cfg(unix)]
+#[ignore = "local full SimpleWiki subprocess time and peak-memory benchmark"]
+fn simplewiki_cli_process_metrics() {
+    let path = corpus_path("simplewiki-full.xml.bz2");
+    let mut command = validation_command(env!("CARGO_BIN_EXE_fastbz2"), &path, requested_threads());
+    let metrics = common::measure(&mut command).unwrap();
+    assert!(metrics.status.success());
+    print_process_metrics("fastbz2 bzip2", &metrics);
+}
+
+#[test]
+#[cfg(unix)]
+#[ignore = "local gzip subprocess time and peak-memory benchmark"]
+fn gzip_cli_process_metrics() {
+    let path = corpus_path("simplewiki-full.xml.gz");
+    let threads = requested_threads();
+    let mut command = validation_command(env!("CARGO_BIN_EXE_fastbz2"), &path, threads);
+    let metrics = common::measure(&mut command).unwrap();
+    assert!(metrics.status.success());
+    let threads = if threads == 0 { "auto".to_owned() } else { threads.to_string() };
+    print_process_metrics(&format!("fastbz2 gzip ({threads} threads)"), &metrics);
+}
+
+#[test]
+#[cfg(unix)]
+#[ignore = "local system gzip subprocess time and peak-memory benchmark"]
+fn system_gzip_process_metrics() {
+    let path = corpus_path("simplewiki-full.xml.gz");
+    let mut command = Command::new("gzip");
+    command.arg("-dc").arg(&path).stdout(Stdio::null());
+    let metrics = common::measure(&mut command).unwrap();
+    assert!(metrics.status.success());
+    print_process_metrics("system gzip", &metrics);
+}
+
+fn rapidgzip_binary() -> std::path::PathBuf {
+    let default = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../git/rapidgzip-rust/target/release/rapidgzip-rust");
+    std::env::var_os("RAPIDGZIP_BIN").map(Into::into).unwrap_or(default)
+}
+
+#[test]
+#[cfg(unix)]
+#[ignore = "local rapidgzip-rust subprocess time and peak-memory benchmark"]
+fn rapidgzip_rust_process_metrics() {
+    let path = corpus_path("simplewiki-full.xml.gz");
+    let mut command = validation_command(rapidgzip_binary(), &path, requested_threads());
+    let metrics = common::measure(&mut command).unwrap();
+    assert!(metrics.status.success());
+    print_process_metrics("rapidgzip-rust", &metrics);
+}
+
+#[test]
+#[cfg(unix)]
+#[ignore = "local single-run gzip performance ratio against rapidgzip-rust"]
+fn gzip_reference_ratio() {
+    let path = corpus_path("simplewiki-full.xml.gz");
+    let warm_path = corpus_path("simplewiki-first-5pct.xml.gz");
+    let threads = requested_threads();
+    let ours_binary = env!("CARGO_BIN_EXE_fastbz2");
+    let reference_binary = rapidgzip_binary();
+
+    warm_validation(ours_binary, &warm_path, threads);
+    warm_validation(&reference_binary, &warm_path, threads);
+
+    let ours = timed_validation(ours_binary, &path, threads);
+    let reference = timed_validation(&reference_binary, &path, threads);
+    assert!(ours.status.success());
+    assert!(reference.status.success());
+
+    let ratio = ours.wall.as_secs_f64() / reference.wall.as_secs_f64();
+    eprintln!("fastbz2 {:.3}s / rapidgzip-rust {:.3}s = {ratio:.3}x", ours.wall.as_secs_f64(), reference.wall.as_secs_f64());
+    assert!(ratio <= 1.2, "fastbz2 must remain within 20% of rapidgzip-rust; measured {ratio:.3}x");
 }
 
 fn timed_vec(name: &str, decode: impl FnOnce() -> Vec<u8>) {

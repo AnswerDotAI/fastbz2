@@ -1,10 +1,10 @@
 # fastbz2
 
-Fast parallel and indexed bzip2 decompression for Rust and Python.
+An active compression-format research workbench with fast bzip2 and gzip decompression.
 
-`fastbz2` provides a native CLI, a Rust library, and a Python module. It handles ordinary and concatenated bzip2 streams, validates every block and stream CRC, and keeps speculative parallel output within a configurable memory bound. Persistent indexes support efficient random access from Python without first expanding the whole file.
+`fastbz2` provides a native CLI, a Rust library, and a Python module. The CLI auto-selects an in-repo bzip2 or gzip decoder from the filename extension, falling back to stream magic when needed. Both decoders handle concatenated streams and fully validate their checksums. The bzip2 implementation also provides parallel decoding and persistent random-access indexes.
 
-This project decompresses bzip2; it does not compress it.
+Compression and additional formats are planned, but the current implementation decompresses bzip2 and gzip.
 
 ## Install
 
@@ -25,10 +25,11 @@ cargo add fastbz2 --git https://github.com/AnswerDotAI/fastbz2
 
 ## CLI
 
-Decoding is the default operation. A `.bz2` suffix is removed for the output name; other input names gain `.out`.
+Decoding is the default operation. `.bz2`, `.bzip2`, `.gz`, and `.gzip` select their corresponding decoder and are removed from the output name. `.tbz`, `.tbz2`, and `.tgz` produce a `.tar` filename; this currently decompresses the tar stream rather than extracting its entries. For stdin and unrecognised extensions, bzip2 or gzip magic selects the decoder. Other input names gain `.out`.
 
 ```bash
 fastbz2 dump.xml.bz2                 # write dump.xml
+fastbz2 events.json.gz               # write events.json
 fastbz2 dump.xml.bz2 -o result.xml   # choose the output path
 fastbz2 dump.xml.bz2 -o -            # write plaintext to stdout
 fastbz2 -                             # read compressed data from stdin
@@ -37,16 +38,16 @@ fastbz2 -                             # read compressed data from stdin
 Multiple inputs are decoded in order, with parallelism applied inside each file. `-C/--output-dir` collects their outputs in one directory:
 
 ```bash
-fastbz2 *.bz2 -C decoded
-fastbz2 *.bz2 -C decoded --skip-existing
+fastbz2 data/*.bz2 logs/*.gz -C decoded
+fastbz2 data/*.bz2 logs/*.gz -C decoded --skip-existing
 ```
 
 The alternative modes are flags rather than subcommands:
 
 ```bash
 fastbz2 --test dump.xml.bz2          # fully decode and validate, writing nothing
-fastbz2 --index dump.xml.bz2         # write dump.xml.bz2.fbz2i
-fastbz2 --list dump.xml.bz2          # print the validated stream/block layout
+fastbz2 --index dump.xml.bz2         # write dump.xml.bz2.fbz2i (bzip2 only)
+fastbz2 --list events.json.gz        # print the validated member/block layout
 fastbz2 --list --json dump.xml.bz2   # emit the complete layout as JSON
 ```
 
@@ -62,9 +63,11 @@ fastbz2 --list --json dump.xml.bz2   # emit the complete layout as JSON
 
 Long interactive operations report completion, decoded throughput, compression ratio, and ETA on stderr. Progress is disabled automatically when stderr is redirected; `-q/--quiet` also suppresses progress and skip notices.
 
-`-P/--threads 0`, the default, uses all available CPUs. `--memory-limit` bounds speculative decoded output and defaults to `1G`.
+`-P/--threads 0`, the default, uses the machine's available parallelism; an explicit positive value is honoured by either codec. `--memory-limit` bounds speculative output in the shared scheduler and defaults to `1G`. Gzip uses parallel dynamic-block discovery only when the input and memory budget can amortize it, otherwise selecting its serial path automatically.
 
 ## Python
+
+The Python API currently exposes the bzip2 backend. Unified Python dispatch will follow the CLI workbench rather than being designed ahead of it.
 
 ### One-shot decompression and validation
 
@@ -125,20 +128,39 @@ fn main() -> fastbz2::Result<()> {
 
 `decompress` returns a `Vec<u8>`. `decode_to_writer` returns a validated `Index` while streaming output, `build_index` validates into a sink, and their `*_with_progress` variants report completed compressed and decoded byte counts. `IndexedReader` implements `Read` and `Seek`; it can build an index itself or load a persisted one with `open_with_index`.
 
+The in-repo gzip decoder is available separately so callers can choose explicitly:
+
+```rust
+let plain = fastbz2::gzip::decompress(&compressed_gzip)?;
+```
+
+`gzip::decompress_to_writer` and `gzip::decompress_to_writer_with_options` return a validated report containing gzip member metadata, each DEFLATE block's kind and ranges, and counts of accepted speculative and serial-fallback chunks. They support stored, fixed-Huffman, and dynamic-Huffman blocks, optional gzip headers, and concatenated members.
+
 ## Performance
 
-These are single local release-mode runs on the primary Apple Silicon development machine, using 18 workers for parallel rows. They are observations rather than statistically aggregated benchmarks. Modes are stated per row because a streaming sink, an in-memory `Vec<u8>`, and a CLI pipeline have different allocation and I/O costs; compare rows using the same method most directly.
+These are single local release-mode runs on the primary 18-core Apple Silicon development machine. Bzip2 parallel rows use 18 workers. The gzip comparison warms each executable with the 5% fixture, then measures exactly one full validation run; peak physical footprint comes from a separate sampled run because process inspection can perturb such a short workload. These are observations rather than statistical aggregates. Modes are stated per row because a streaming sink, an in-memory `Vec<u8>`, and a CLI pipeline have different allocation and I/O costs; compare rows using the same method most directly.
 
 Full Simple English Wikipedia (`338 MB` compressed, `1,688,460,257` bytes decoded):
 
 | Decoder | Mode | Seconds |
 |---|---|---:|
-| fastbz2 | parallel, 18 threads, streaming sink | 2.244 |
+| fastbz2 | parallel, 18 threads, streaming sink | 2.515 |
 | crabz2 0.4.0 | parallel | 4.460 |
 | bzip2 | serial CLI | 20.310 |
 | pbzip2 1.1.13 | CLI | 20.240 |
 | libbz2-rs 0.2.5 | serial, in process | 20.700 |
 | fastbz2 | serial, in process | 21.279 |
+
+
+Full SimpleWiki recompressed with system `gzip -6` (`438,904,466` bytes compressed, `1,688,460,257` bytes decoded):
+
+| Decoder | Mode | Seconds | Peak physical footprint |
+|---|---|---:|---:|
+| rapidgzip-rust, local checkout | auto parallel, validation sink | 0.363 | 585 MiB |
+| fastbz2 | auto parallel, validation sink | 0.357 | 552 MiB |
+| Apple gzip | serial, stdout discarded | 1.371 | 1.2 MiB |
+
+The memory values use macOS physical footprint rather than `ru_maxrss`. The fastbz2 CLI memory-maps its 419 MiB input, so clean reclaimable file pages make RSS look roughly 419 MiB larger; `pread`-based tools leave the same cached pages outside process RSS. Physical footprint makes the comparison meaningful.
 
 The first 1,000 streams of English Wikipedia (`654,362,682` bytes compressed, `2,715,335,085` bytes decoded, 99,853 pages) exercise scheduling across many short concatenated streams:
 
@@ -157,11 +179,13 @@ Homebrew `pbzip2` 1.1.13 could not safely decompress the complete 26,668,484,995
 
 ## Implementation and compatibility
 
-The decoder is safe, portable Rust with a tuned 4096-entry Huffman lookup table for codes up to 12 bits and canonical fallback for longer codes. A structural scan finds possible non-byte-aligned block markers; these remain speculative until ordered decoding establishes the exact stream chain and validates all block and combined-stream CRCs. A rolling scheduler keeps workers busy across concatenated streams while bounding decoded results awaiting validation.
+The production codec logic is portable Rust. The bzip2 decoder uses a tuned 4096-entry Huffman lookup table for codes up to 12 bits and canonical fallback for longer codes. A structural scan finds possible non-byte-aligned block markers; these remain speculative until ordered decoding establishes the exact stream chain and validates all block and combined-stream CRCs. A rolling scheduler keeps workers busy across concatenated streams while bounding decoded results awaiting validation.
+
+The gzip backend implements RFC 1952 framing and DEFLATE directly in this repository. For sufficiently large dynamic-Huffman inputs it discovers independently decodable boundaries, decodes speculative chunks through the shared byte-budgeted scheduler, and represents unknown predecessor bytes as compact markers. The ordered coordinator resolves only the suffix needed to derive the next 32 KiB history window; full marker resolution and per-chunk CRC run as priority work on the same staged worker queue, and CRCs are combined in order. Once a chunk has a marker-free window, the same decoder switches its remaining output from `u16` markers to ordinary bytes. Small, stored-heavy, fixed-heavy, one-thread, and low-memory inputs use the serial path; concatenated members may independently choose either path. FHCRC, CRC32, and ISIZE are always validated. `crc32fast` is the only production codec helper; `flate2` is dev-only.
 
 Legacy randomized blocks generated by bzip2 releases before 0.9.5 are intentionally unsupported. Normal `BZh1` through `BZh9` streams and concatenated streams are supported.
 
-The architecture was inspired by Maximilian Knespel's [`librapidarchive`](https://github.com/mxmlnkn/librapidarchive) and [`indexed_bzip2`](https://github.com/mxmlnkn/indexed_bzip2): in particular, scanning for non-byte-aligned bzip2 block markers, independently decoding blocks, ordered prefetch, and indexed seeking. That project's specialised decoder is itself derived from Rob Landley's 0BSD [`bzcat` implementation in Toybox](https://github.com/landley/toybox).
+The architecture was inspired by Maximilian Knespel's [`librapidarchive`](https://github.com/mxmlnkn/librapidarchive), [`indexed_bzip2`](https://github.com/mxmlnkn/indexed_bzip2), and [`rapidgzip-rust`](https://github.com/mxmlnkn/rapidgzip-rust). The bzip2 design draws on non-byte-aligned marker scanning, independent block decoding, ordered prefetch, and indexed seeking; the gzip design draws on structurally validated dynamic-block discovery, predecessor markers, marker-free handoff to byte output, and suffix-only window resolution. The specialised bzip2 decoder is itself derived from Rob Landley's 0BSD [`bzcat` implementation in Toybox](https://github.com/landley/toybox).
 
 ## Development
 

@@ -6,7 +6,7 @@ backend-path = ["."]
 [project]
 name = "fastbz2"
 dynamic = ["version"]
-description = "Fast parallel and indexed bzip2 decompression for Rust and Python"
+description = "Compression-format research workbench with fast bzip2 and gzip decompression"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.10"
 readme = "README.md"

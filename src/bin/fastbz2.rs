@@ -8,7 +8,7 @@ use std::{
 
 use clap::{ArgGroup, Parser};
 use fastbz2::{
-    DecodeOptions, DecodeProgress, Error, Index, Source, build_index_with_progress, decode_to_writer_with_progress, decompress_to_writer_with_progress,
+    DecodeOptions, DecodeProgress, Error, Index, Source, build_index_with_progress, decode_to_writer_with_progress, decompress_to_writer_with_progress, gzip,
 };
 use serde_json::{Value, json};
 use tempfile::NamedTempFile;
@@ -16,7 +16,7 @@ use tempfile::NamedTempFile;
 #[derive(Parser)]
 #[command(
     version,
-    about = "Fast parallel and indexed bzip2 decompression",
+    about = "Fast compression-format research workbench",
     group(ArgGroup::new("mode").args(["test", "index", "list"]))
 )]
 struct Cli {
@@ -26,7 +26,7 @@ struct Cli {
     /// Fully decode and validate without writing plaintext.
     #[arg(long)]
     test: bool,
-    /// Build validated, source-bound block indexes.
+    /// Build validated, source-bound bzip2 block indexes.
     #[arg(long)]
     index: bool,
     /// Validate and show stream/block layouts.
@@ -38,10 +38,10 @@ struct Cli {
     /// Put decoded files in DIRECTORY.
     #[arg(short = 'C', long = "output-dir", conflicts_with_all = ["test", "index", "list", "output"])]
     output_dir: Option<PathBuf>,
-    /// Worker threads; 0 uses all available CPUs.
+    /// Bzip2 worker threads; 0 uses all available CPUs.
     #[arg(short = 'P', long, default_value_t = 0)]
     threads: usize,
-    /// Maximum speculative decoded output.
+    /// Maximum speculative bzip2 output.
     #[arg(long, default_value = "1G", value_parser = parse_size)]
     memory_limit: usize,
     /// Refuse to decode more than SIZE bytes per input.
@@ -62,6 +62,12 @@ struct Cli {
     /// Emit list output as JSON.
     #[arg(long, requires = "list")]
     json: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Format {
+    Bzip2,
+    Gzip,
 }
 
 fn main() -> ExitCode {
@@ -143,6 +149,9 @@ fn run_index(cli: &Cli, options: DecodeOptions) -> fastbz2::Result<()> {
             continue;
         }
         let source = Source::open(input_path)?;
+        if select_format(input, source.as_slice())? != Format::Bzip2 {
+            return Err(invalid("--index is currently supported only for bzip2 inputs"));
+        }
         let index = build_index_data(source.as_slice(), input, options, cli.max_output, cli.quiet)?;
         let encoded = index.to_bytes();
         if output == Path::new("-") {
@@ -158,11 +167,23 @@ fn run_list(cli: &Cli, options: DecodeOptions) -> fastbz2::Result<()> {
     let mut values = Vec::new();
     for input in &cli.inputs {
         let source = Source::open(input)?;
-        let index = build_index_data(source.as_slice(), input, options, cli.max_output, cli.quiet)?;
-        if cli.json {
-            values.push(index_json(input, &index));
-        } else {
-            print_index((cli.inputs.len() > 1).then_some(input), &index);
+        match select_format(input, source.as_slice())? {
+            Format::Bzip2 => {
+                let index = build_index_data(source.as_slice(), input, options, cli.max_output, cli.quiet)?;
+                if cli.json {
+                    values.push(index_json(input, &index));
+                } else {
+                    print_index((cli.inputs.len() > 1).then_some(input), &index);
+                }
+            }
+            Format::Gzip => {
+                let report = build_gzip_report_data(source.as_slice(), input, options, cli.max_output, cli.quiet)?;
+                if cli.json {
+                    values.push(gzip_json(input, &report));
+                } else {
+                    print_gzip_report((cli.inputs.len() > 1).then_some(input), &report);
+                }
+            }
         }
     }
     if cli.json {
@@ -187,21 +208,26 @@ fn decode_input(input: &str, output: &mut impl Write, options: DecodeOptions, ma
 fn decode_data(data: &[u8], label: &str, output: &mut impl Write, options: DecodeOptions, max_output: Option<usize>, quiet: bool) -> fastbz2::Result<()> {
     let mut output = LimitedWriter::new(output, max_output);
     let mut display = ProgressDisplay::new(label, data.len() as u64, quiet);
-    let result = decompress_to_writer_with_progress(data, &mut output, options, |progress| display.update(progress));
-    display.finish();
-    result
+    match select_format(label, data)? {
+        Format::Bzip2 => decompress_to_writer_with_progress(data, &mut output, options, |progress| display.update(progress)),
+        Format::Gzip => gzip::decompress_to_writer_with_options_and_progress(data, &mut output, options, |progress| display.update(progress)).map(|_| ()),
+    }
+}
+
+fn build_gzip_report_data(data: &[u8], label: &str, options: DecodeOptions, max_output: Option<usize>, quiet: bool) -> fastbz2::Result<gzip::Report> {
+    let mut sink = LimitedWriter::new(io::sink(), max_output);
+    let mut display = ProgressDisplay::new(label, data.len() as u64, quiet);
+    gzip::decompress_to_writer_with_options_and_progress(data, &mut sink, options, |progress| display.update(progress))
 }
 
 fn build_index_data(data: &[u8], label: &str, options: DecodeOptions, max_output: Option<usize>, quiet: bool) -> fastbz2::Result<Index> {
     let mut display = ProgressDisplay::new(label, data.len() as u64, quiet);
-    let result = if let Some(limit) = max_output {
+    if let Some(limit) = max_output {
         let mut sink = LimitedWriter::new(io::sink(), Some(limit));
         decode_to_writer_with_progress(data, &mut sink, options, |progress| display.update(progress))
     } else {
         build_index_with_progress(data, options, |progress| display.update(progress))
-    };
-    display.finish();
-    result
+    }
 }
 
 struct LimitedWriter<W> {
@@ -332,10 +358,31 @@ fn output_in(input: &Path, directory: Option<&Path>) -> PathBuf {
     directory.map_or_else(|| default_output(input), |directory| directory.join(output))
 }
 
+fn format_extension(input: &Path) -> Option<(Format, &'static str)> {
+    let extension = input.extension()?.to_str()?.to_ascii_lowercase();
+    match extension.as_str() {
+        "bz2" | "bzip2" => Some((Format::Bzip2, "")),
+        "tbz" | "tbz2" => Some((Format::Bzip2, "tar")),
+        "gz" | "gzip" => Some((Format::Gzip, "")),
+        "tgz" => Some((Format::Gzip, "tar")),
+        _ => None,
+    }
+}
+
 fn default_output(input: &Path) -> PathBuf {
-    match input.extension().and_then(|extension| extension.to_str()) {
-        Some("bz2") => input.with_extension(""),
-        _ => PathBuf::from(format!("{}.out", input.display())),
+    format_extension(input).map_or_else(|| PathBuf::from(format!("{}.out", input.display())), |(_, extension)| input.with_extension(extension))
+}
+
+fn select_format(input: &str, data: &[u8]) -> fastbz2::Result<Format> {
+    if let Some((format, _)) = format_extension(Path::new(input)) {
+        return Ok(format);
+    }
+    if data.starts_with(b"BZh") {
+        Ok(Format::Bzip2)
+    } else if data.starts_with(&[0x1f, 0x8b]) {
+        Ok(Format::Gzip)
+    } else {
+        Err(invalid(format!("cannot determine compression format for {input}; expected a bzip2/gzip extension or magic")))
     }
 }
 
@@ -355,9 +402,37 @@ fn print_index(input: Option<&String>, index: &Index) {
     }
 }
 
+fn print_gzip_report(input: Option<&String>, report: &gzip::Report) {
+    if let Some(input) = input {
+        println!("input\t{input}");
+    }
+    println!("format\tgzip");
+    println!("compressed_bytes\t{}", report.source_len);
+    println!("decoded_bytes\t{}", report.decoded_len);
+    println!("members\t{}", report.members.len());
+    println!("blocks\t{}", report.blocks.len());
+    println!("speculative_chunks\t{}", report.speculative_chunks);
+    println!("fallback_chunks\t{}", report.fallback_chunks);
+    for (number, member) in report.members.iter().enumerate() {
+        let name = member.name.as_deref().map(String::from_utf8_lossy).unwrap_or_default();
+        println!(
+            "member\t{number}\tblocks={}\tdecoded={}\tmtime={}\tos={}\tname={name}",
+            member_block_count(report, number),
+            member.decoded_len,
+            member.mtime,
+            member.operating_system
+        );
+    }
+}
+
+fn member_block_count(report: &gzip::Report, member: usize) -> usize {
+    report.blocks.iter().filter(|block| block.member as usize == member).count()
+}
+
 fn index_json(input: &str, index: &Index) -> Value {
     json!({
         "input": input,
+        "format": "bzip2",
         "source_bytes": index.source_len,
         "source_hash": hex(&index.source_hash),
         "decoded_bytes": index.decoded_len,
@@ -380,6 +455,41 @@ fn index_json(input: &str, index: &Index) -> Value {
             "decoded_bytes": block.decoded_len,
             "expected_crc": block.expected_crc,
             "stream": block.stream,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+fn gzip_json(input: &str, report: &gzip::Report) -> Value {
+    json!({
+        "input": input,
+        "format": "gzip",
+        "source_bytes": report.source_len,
+        "decoded_bytes": report.decoded_len,
+        "speculative_chunks": report.speculative_chunks,
+        "fallback_chunks": report.fallback_chunks,
+        "members": report.members.iter().enumerate().map(|(number, member)| json!({
+            "number": number,
+            "compressed_start": member.compressed_start,
+            "deflate_start": member.deflate_start,
+            "compressed_end": member.compressed_end,
+            "decoded_start": member.decoded_start,
+            "decoded_bytes": member.decoded_len,
+            "expected_crc": member.expected_crc,
+            "mtime": member.mtime,
+            "extra_flags": member.extra_flags,
+            "operating_system": member.operating_system,
+            "name": member.name.as_deref().map(|name| String::from_utf8_lossy(name)),
+            "comment": member.comment.as_deref().map(|comment| String::from_utf8_lossy(comment)),
+        })).collect::<Vec<_>>(),
+        "blocks": report.blocks.iter().enumerate().map(|(number, block)| json!({
+            "number": number,
+            "member": block.member,
+            "kind": block.kind.as_str(),
+            "final": block.final_block,
+            "compressed_start_bit": block.compressed_start_bit,
+            "compressed_end_bit": block.compressed_end_bit,
+            "decoded_start": block.decoded_start,
+            "decoded_bytes": block.decoded_len,
         })).collect::<Vec<_>>(),
     })
 }
@@ -433,7 +543,7 @@ fn exit_status(error: &Error) -> u8 {
         Error::Io(source) if source.kind() == io::ErrorKind::InvalidData => 3,
         Error::Io(_) => 1,
         Error::InvalidConfiguration(_) => 2,
-        Error::InvalidStreamHeader | Error::Decode { .. } | Error::InvalidIndex(_) => 3,
+        Error::InvalidStreamHeader | Error::InvalidGzip(_) | Error::Decode { .. } | Error::InvalidIndex(_) => 3,
         _ => 4,
     }
 }
