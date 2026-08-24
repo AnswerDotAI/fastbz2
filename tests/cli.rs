@@ -7,6 +7,7 @@ use std::{
 };
 
 use crabz2::{Level, compress};
+use flate2::{Compression, write::GzEncoder};
 
 fn binary() -> Command {
     Command::new(env!("CARGO_BIN_EXE_fastbz2"))
@@ -16,6 +17,12 @@ fn write_compressed(path: &Path, plain: &[u8]) {
     fs::write(path, compress(plain, Level::FASTEST)).unwrap();
 }
 
+fn write_gzip(path: &Path, plain: &[u8]) {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+    encoder.write_all(plain).unwrap();
+    fs::write(path, encoder.finish().unwrap()).unwrap();
+}
+
 #[test]
 fn decode_test_index_and_list() {
     let directory = tempfile::tempdir().unwrap();
@@ -23,7 +30,7 @@ fn decode_test_index_and_list() {
     let output = directory.path().join("sample");
     let index = directory.path().join("sample.fbz2i");
     let plain: Vec<_> = (0..250_000).map(|i| ((i * 31 + i / 97) & 255) as u8).collect();
-    fs::write(&input, compress(&plain, Level::FASTEST)).unwrap();
+    write_compressed(&input, &plain);
 
     let decoded = binary().args([input.to_str().unwrap(), "-P", "2"]).status().unwrap();
     assert!(decoded.success());
@@ -195,4 +202,83 @@ fn list_json_describes_one_or_many_inputs() {
 
     let missing_mode = binary().args(["--json", first.to_str().unwrap()]).output().unwrap();
     assert_eq!(missing_mode.status.code(), Some(2));
+}
+
+#[test]
+fn gzip_extension_selects_decoder_across_cli_modes() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("sample.gz");
+    let output = directory.path().join("sample");
+    let plain: Vec<_> = (0..250_000).map(|i| ((i * 31 + i / 97) & 255) as u8).collect();
+    write_gzip(&input, &plain);
+
+    let decoded = binary().arg(input.to_str().unwrap()).output().unwrap();
+    assert!(decoded.status.success(), "{}", String::from_utf8_lossy(&decoded.stderr));
+    assert_eq!(fs::read(output).unwrap(), plain);
+
+    let tested = binary().args(["--test", input.to_str().unwrap()]).output().unwrap();
+    assert!(tested.status.success());
+
+    let listed = binary().args(["--list", "--json", input.to_str().unwrap()]).output().unwrap();
+    assert!(listed.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(value["format"], "gzip");
+    assert_eq!(value["decoded_bytes"], plain.len());
+    assert_eq!(value["members"].as_array().unwrap().len(), 1);
+    assert!(!value["blocks"].as_array().unwrap().is_empty());
+
+    let indexed = binary().args(["--index", input.to_str().unwrap()]).output().unwrap();
+    assert_eq!(indexed.status.code(), Some(2));
+    assert!(String::from_utf8(indexed.stderr).unwrap().contains("only for bzip2"));
+}
+
+#[test]
+fn gzip_magic_fallback_stdin_limits_and_corruption_work() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("mystery.data");
+    let output = directory.path().join("mystery.data.out");
+    let plain = b"gzip magic fallback".repeat(2_000);
+    write_gzip(&input, &plain);
+
+    let decoded = binary().arg(input.to_str().unwrap()).output().unwrap();
+    assert!(decoded.status.success());
+    assert_eq!(fs::read(&output).unwrap(), plain);
+    fs::remove_file(&output).unwrap();
+
+    let compressed = fs::read(&input).unwrap();
+    let mut child = binary().arg("-").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    child.stdin.take().unwrap().write_all(&compressed).unwrap();
+    let stdin = child.wait_with_output().unwrap();
+    assert!(stdin.status.success());
+    assert_eq!(stdin.stdout, plain);
+
+    let limited = binary().args(["--max-output", "1K", input.to_str().unwrap()]).output().unwrap();
+    assert_eq!(limited.status.code(), Some(3));
+    assert!(!output.exists());
+
+    let mut corrupt = compressed;
+    let crc = corrupt.len() - 8;
+    corrupt[crc] ^= 1;
+    fs::write(&input, corrupt).unwrap();
+    let rejected = binary().arg(input.to_str().unwrap()).output().unwrap();
+    assert_eq!(rejected.status.code(), Some(3));
+    assert!(!output.exists());
+}
+
+#[test]
+fn mixed_bzip2_and_gzip_inputs_share_output_policy() {
+    let directory = tempfile::tempdir().unwrap();
+    let bzip2 = directory.path().join("first.bz2");
+    let gzip = directory.path().join("second.gz");
+    let tgz = directory.path().join("bundle.tgz");
+    let output_dir = directory.path().join("decoded");
+    write_compressed(&bzip2, b"bzip2");
+    write_gzip(&gzip, b"gzip");
+    write_gzip(&tgz, b"tar payload");
+
+    let decoded = binary().args(["-C", output_dir.to_str().unwrap(), bzip2.to_str().unwrap(), gzip.to_str().unwrap(), tgz.to_str().unwrap()]).output().unwrap();
+    assert!(decoded.status.success(), "{}", String::from_utf8_lossy(&decoded.stderr));
+    assert_eq!(fs::read(output_dir.join("first")).unwrap(), b"bzip2");
+    assert_eq!(fs::read(output_dir.join("second")).unwrap(), b"gzip");
+    assert_eq!(fs::read(output_dir.join("bundle.tar")).unwrap(), b"tar payload");
 }

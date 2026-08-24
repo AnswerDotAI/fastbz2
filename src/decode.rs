@@ -1,13 +1,9 @@
-use std::{
-    collections::HashMap,
-    io::Write,
-    sync::{Arc, Condvar, Mutex, mpsc},
-    thread,
-};
+use std::{io::Write, sync::Arc, thread};
 
 use rayon::{ThreadPool, ThreadPoolBuilder};
 
 use crate::format::scan_with_pool;
+use crate::pipeline::{Job, OrderedResults, PipelineLimits, run_ordered};
 use crate::{BlockCandidate, BlockIndex, DecodeError, EndCandidate, Error, Index, MAX_DECODED_BLOCK, Result, StreamIndex, combine_stream_crc, decoder};
 
 pub const DEFAULT_MEMORY_LIMIT: usize = 1024 * 1024 * 1024;
@@ -37,7 +33,7 @@ impl DecodeOptions {
         if self.threads != 0 { self.threads } else { thread::available_parallelism().map(usize::from).unwrap_or(1) }
     }
 
-    fn validate(self) -> Result<Self> {
+    pub(crate) fn validate(self) -> Result<Self> {
         if self.memory_limit < MAX_DECODED_BLOCK {
             return Err(Error::InvalidConfiguration(format!("memory limit must be at least {MAX_DECODED_BLOCK} bytes")));
         }
@@ -133,25 +129,25 @@ fn decode_to_writer_impl(data: &[u8], output: &mut impl Write, options: DecodeOp
         .iter()
         .enumerate()
         .filter_map(|(marker_index, marker)| match marker {
-            Marker::Block(block) => Some(CandidateJob { marker_index, start_bit: block.bit_offset, expected_crc: block.expected_crc }),
+            Marker::Block(block) => Some(Job {
+                key: marker_index,
+                reservation: MAX_DECODED_BLOCK,
+                payload: CandidateJob { start_bit: block.bit_offset, expected_crc: block.expected_crc },
+            }),
             Marker::End(_) => None,
         })
         .collect();
-    let work = WorkQueue::new(options.memory_limit);
-    let (sender, receiver) = mpsc::channel();
-
-    thread::scope(|scope| {
-        let worker = scope.spawn(|| {
-            pool.broadcast(|_| worker_loop(data, &jobs, &work, &sender));
-        });
-        let result = {
-            let mut candidates = ParallelCandidates { receiver, ready: HashMap::new(), work: &work };
+    run_ordered(
+        &pool,
+        &jobs,
+        PipelineLimits { memory: options.memory_limit, active: usize::MAX },
+        |job| decoder::decode_candidate(data, job.start_bit, job.expected_crc),
+        candidate_len,
+        |results| {
+            let mut candidates = ParallelCandidates { results };
             assemble(data, output, &markers, &mut candidates, progress)
-        };
-        work.cancel();
-        worker.join().map_err(|_| Error::InvalidConfiguration("parallel decoder worker panicked".into()))?;
-        result
-    })
+        },
+    )
 }
 
 fn assemble(
@@ -253,111 +249,29 @@ impl Candidates for SerialCandidates<'_> {
 
 #[derive(Clone, Copy)]
 struct CandidateJob {
-    marker_index: usize,
     start_bit: u64,
     expected_crc: u32,
-}
-
-struct WorkState {
-    next: usize,
-    reserved: usize,
-    cancelled: bool,
-}
-
-struct WorkQueue {
-    limit: usize,
-    state: Mutex<WorkState>,
-    wake: Condvar,
-}
-
-impl WorkQueue {
-    fn new(limit: usize) -> Self {
-        Self { limit, state: Mutex::new(WorkState { next: 0, reserved: 0, cancelled: false }), wake: Condvar::new() }
-    }
-
-    fn next(&self, job_count: usize) -> Option<usize> {
-        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        while state.reserved > self.limit - MAX_DECODED_BLOCK && state.next < job_count && !state.cancelled {
-            state = self.wake.wait(state).unwrap_or_else(|error| error.into_inner());
-        }
-        if state.cancelled || state.next >= job_count {
-            return None;
-        }
-        let next = state.next;
-        state.next += 1;
-        state.reserved += MAX_DECODED_BLOCK;
-        Some(next)
-    }
-
-    fn complete(&self, decoded_len: usize) {
-        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        state.reserved -= MAX_DECODED_BLOCK - decoded_len;
-        self.wake.notify_all();
-    }
-
-    fn retire(&self, decoded_len: usize) {
-        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        state.reserved -= decoded_len;
-        self.wake.notify_all();
-    }
-
-    fn cancel(&self) {
-        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        state.cancelled = true;
-        self.wake.notify_all();
-    }
-}
-
-type CandidateResult = (usize, Result<decoder::DecodedCandidate>);
-
-fn worker_loop(data: &[u8], jobs: &[CandidateJob], work: &WorkQueue, sender: &mpsc::Sender<CandidateResult>) {
-    while let Some(index) = work.next(jobs.len()) {
-        let job = jobs[index];
-        let result = decoder::decode_candidate(data, job.start_bit, job.expected_crc);
-        let decoded_len = candidate_len(&result);
-        work.complete(decoded_len);
-        if sender.send((job.marker_index, result)).is_err() {
-            work.retire(decoded_len);
-            return;
-        }
-    }
 }
 
 fn candidate_len(result: &Result<decoder::DecodedCandidate>) -> usize {
     result.as_ref().map_or(0, |decoded| decoded.output.len())
 }
 
-struct ParallelCandidates<'a> {
-    receiver: mpsc::Receiver<CandidateResult>,
-    ready: HashMap<usize, Result<decoder::DecodedCandidate>>,
-    work: &'a WorkQueue,
+struct ParallelCandidates<'results, 'pipeline> {
+    results: &'results mut OrderedResults<'pipeline, Result<decoder::DecodedCandidate>>,
 }
 
-impl Candidates for ParallelCandidates<'_> {
+impl Candidates for ParallelCandidates<'_, '_> {
     fn take(&mut self, marker_index: usize) -> Result<decoder::DecodedCandidate> {
-        while !self.ready.contains_key(&marker_index) {
-            let (index, result) = self.receiver.recv().map_err(|_| Error::InvalidConfiguration("parallel decoder stopped early".into()))?;
-            if index < marker_index {
-                self.work.retire(candidate_len(&result));
-            } else {
-                self.ready.insert(index, result);
-            }
-        }
-        let result = self.ready.remove(&marker_index).unwrap();
-        self.work.retire(candidate_len(&result));
-        result
+        self.results.take(marker_index)?
     }
 
     fn discard_before(&mut self, marker_index: usize) {
-        let stale: Vec<_> = self.ready.keys().copied().filter(|&index| index < marker_index).collect();
-        for index in stale {
-            let result = self.ready.remove(&index).unwrap();
-            self.work.retire(candidate_len(&result));
-        }
+        self.results.discard_before(marker_index);
     }
 }
 
-fn thread_pool(threads: usize) -> Result<Option<Arc<ThreadPool>>> {
+pub(crate) fn thread_pool(threads: usize) -> Result<Option<Arc<ThreadPool>>> {
     if threads <= 1 {
         return Ok(None);
     }
