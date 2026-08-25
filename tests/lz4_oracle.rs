@@ -1,6 +1,6 @@
 use std::io::{Read, Write};
 
-use fbz::{DecodeOptions, lz4};
+use fbz::{DecodeOptions, MAX_DECODED_BLOCK, lz4};
 use lz4_flex::frame::{BlockMode, BlockSize, FrameDecoder, FrameEncoder, FrameInfo};
 
 fn encode(data: &[u8], block_size: BlockSize, block_mode: BlockMode, block_checksum: bool, content_checksum: bool, content_size: bool) -> Vec<u8> {
@@ -73,4 +73,11 @@ fn incompressible_multiblock_input_exercises_parallel_scheduler() {
     let encoded = encode(&data, BlockSize::Max64KB, BlockMode::Independent, true, true, true);
     assert!(encoded.len() > 1024 * 1024);
     assert_matches(&data, &encoded, DecodeOptions { threads: 4, ..DecodeOptions::default() });
+}
+
+#[test]
+fn a_small_speculative_budget_falls_back_to_incremental_serial_blocks() {
+    let data = b"large declared blocks do not require speculative memory ".repeat(120_000);
+    let encoded = encode(&data, BlockSize::Max4MB, BlockMode::Independent, true, true, true);
+    assert_matches(&data, &encoded, DecodeOptions { threads: 4, memory_limit: MAX_DECODED_BLOCK });
 }
