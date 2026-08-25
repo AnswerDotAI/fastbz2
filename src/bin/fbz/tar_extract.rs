@@ -6,7 +6,7 @@ use std::{
     thread,
 };
 
-use fastbz2::{Error, OutputSink, Result};
+use fbz::{Error, OutputSink, Result};
 
 use super::archive_extract;
 

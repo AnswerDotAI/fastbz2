@@ -10,7 +10,7 @@ use std::{
 };
 
 use crabz2::{Level, compress};
-use fastbz2::{DecodeOptions, decompress};
+use fbz::{DecodeOptions, decompress};
 use libbz2_rs_sys::{BZ_OK, BZ_STREAM_END, BZ2_bzDecompress, BZ2_bzDecompressEnd, BZ2_bzDecompressInit, bz_stream};
 
 const CHUNK: usize = 64 * 1024;
@@ -31,7 +31,7 @@ fn corpus_files(extension: &str) -> Vec<PathBuf> {
 }
 
 /// Decode every concatenated stream through the low-level API so the oracle
-/// has the same whole-file semantics as fastbz2.
+/// has the same whole-file semantics as fbz.
 fn oracle_decompress(input: &[u8]) -> Result<Vec<u8>, i32> {
     if input.is_empty() {
         return Err(libbz2_rs_sys::BZ_DATA_ERROR_MAGIC);
@@ -106,7 +106,7 @@ fn valid_upstream_corpus_matches_oracle() {
         let expected = oracle_decompress(&encoded).unwrap_or_else(|status| panic!("oracle rejected {} with {status}", path.display()));
         for threads in [1, 2] {
             let actual = decompress(&encoded, DecodeOptions { threads, ..DecodeOptions::default() })
-                .unwrap_or_else(|error| panic!("fastbz2 rejected {} with {error}", path.display()));
+                .unwrap_or_else(|error| panic!("fbz rejected {} with {error}", path.display()));
             assert_eq!(actual, expected, "{} with {threads} threads", path.display());
         }
     }
@@ -119,7 +119,7 @@ fn corrupt_upstream_corpus_is_rejected() {
     for path in files {
         let encoded = fs::read(&path).unwrap();
         assert!(oracle_decompress(&encoded).is_err(), "oracle accepted {}", path.display());
-        assert!(decompress(&encoded, DecodeOptions::default()).is_err(), "fastbz2 accepted {}", path.display());
+        assert!(decompress(&encoded, DecodeOptions::default()).is_err(), "fbz accepted {}", path.display());
     }
 }
 
@@ -139,11 +139,11 @@ fn performance_regression_stays_bounded() {
     let plain = source.repeat(2);
     let encoded = compress(&plain, Level::FASTEST);
     let repeats = 3;
-    let fastbz2_time = benchmark::elapsed(repeats, || {
+    let fbz_time = benchmark::elapsed(repeats, || {
         std::hint::black_box(decompress(&encoded, DecodeOptions { threads: 2, ..DecodeOptions::default() }).unwrap());
     });
     let oracle_time = benchmark::elapsed(repeats, || {
         std::hint::black_box(oracle_decompress(&encoded).unwrap());
     });
-    assert!(fastbz2_time.as_secs_f64() <= oracle_time.as_secs_f64() * 1.3, "fastbz2 {fastbz2_time:?} exceeded 1.3x oracle {oracle_time:?}");
+    assert!(fbz_time.as_secs_f64() <= oracle_time.as_secs_f64() * 1.3, "fbz {fbz_time:?} exceeded 1.3x oracle {oracle_time:?}");
 }

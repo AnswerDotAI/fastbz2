@@ -5,8 +5,8 @@ mod benchmark;
 use std::io::Read;
 
 #[cfg(not(debug_assertions))]
-use fastbz2::DecodeOptions;
-use fastbz2::gzip;
+use fbz::DecodeOptions;
+use fbz::gzip;
 use flate2::{Compression, read::MultiGzDecoder, write::GzEncoder};
 
 fn oracle_decompress(input: &[u8]) -> Vec<u8> {
@@ -87,13 +87,13 @@ fn assert_performance(plain: &[u8], limit: f64) {
     let encoded = compress(plain);
     assert_eq!(gzip::decompress(&encoded).unwrap(), oracle_decompress(&encoded));
     let repeats = 2;
-    let fastbz2_time = benchmark::elapsed(repeats, || {
+    let fbz_time = benchmark::elapsed(repeats, || {
         std::hint::black_box(gzip::decompress(&encoded).unwrap());
     });
     let oracle_time = benchmark::elapsed(repeats, || {
         std::hint::black_box(oracle_decompress(&encoded));
     });
-    assert!(fastbz2_time.as_secs_f64() <= oracle_time.as_secs_f64() * limit, "fastbz2 gzip {fastbz2_time:?} exceeded {limit}x oracle {oracle_time:?}");
+    assert!(fbz_time.as_secs_f64() <= oracle_time.as_secs_f64() * limit, "fbz gzip {fbz_time:?} exceeded {limit}x oracle {oracle_time:?}");
 }
 
 #[test]

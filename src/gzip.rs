@@ -4,6 +4,7 @@ use std::{io::Write, sync::OnceLock};
 
 use crate::{
     DecodeOptions, DecodeProgress, Error, OutputSink, Result, WriterSink,
+    history::extend_match,
     pipeline::{Job, PipelineLimits, run_staged_ordered},
 };
 
@@ -222,19 +223,6 @@ pub(crate) fn decompress_deflate_to_sink_with_options_and_progress(
 enum InitialHistory {
     Empty,
     Unknown,
-}
-
-fn extend_match<T: Copy>(output: &mut Vec<T>, distance: usize, length: usize) {
-    output.reserve(length);
-    let append_start = output.len();
-    let first = distance.min(length);
-    output.extend_from_within(append_start - distance..append_start - distance + first);
-    let mut copied = first;
-    while copied < length {
-        let count = copied.min(length - copied);
-        output.extend_from_within(append_start..append_start + count);
-        copied += count;
-    }
 }
 
 struct MarkerOutput {
@@ -1132,24 +1120,7 @@ impl<'a, W: OutputSink> Emitter<'a, W> {
         if distance == 0 || distance > available {
             return Err(invalid(format!("back-reference distance {distance} exceeds {available} available bytes")));
         }
-        let original = self.buffer.len();
-        if distance >= length {
-            self.buffer.extend_from_within(original - distance..original - distance + length);
-        } else if distance == 1 {
-            self.buffer.resize(original + length, self.buffer[original - 1]);
-        } else if length <= distance * 2 {
-            self.buffer.extend_from_within(original - distance..original);
-            self.buffer.extend_from_within(original..original + length - distance);
-        } else {
-            self.buffer.resize(original + length, 0);
-            self.buffer.copy_within(original - distance..original, original);
-            let mut copied = distance;
-            while copied < length {
-                let count = copied.min(length - copied);
-                self.buffer.copy_within(original..original + count, original + copied);
-                copied += count;
-            }
-        }
+        extend_match(&mut self.buffer, distance, length);
         self.member_decoded = self.member_decoded.checked_add(length as u64).ok_or_else(|| invalid("decoded offset overflow"))?;
         if self.buffer.len() - self.history_len >= OUTPUT_CHUNK {
             self.flush_pending()?;

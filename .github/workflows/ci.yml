@@ -63,9 +63,9 @@ jobs:
           command: sdist
           args: -o dist
       - run: |
-          python -m venv /tmp/fastbz2-sdist-test
-          /tmp/fastbz2-sdist-test/bin/pip install pytest dist/*.tar.gz
-          /tmp/fastbz2-sdist-test/bin/pytest tests/test_install.py
+          python -m venv /tmp/fbz-sdist-test
+          /tmp/fbz-sdist-test/bin/pip install pytest dist/*.tar.gz
+          /tmp/fbz-sdist-test/bin/pytest tests/test_install.py
       - uses: actions/upload-artifact@v7
         with:
           name: wheels-sdist

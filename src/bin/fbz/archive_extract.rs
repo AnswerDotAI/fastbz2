@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use fastbz2::{Error, Result};
+use fbz::{Error, Result};
 use tempfile::TempDir;
 
 fn path_metadata(path: &Path) -> io::Result<Option<fs::Metadata>> {

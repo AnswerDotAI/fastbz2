@@ -14,7 +14,7 @@ use support::{ZipMethod, simplewiki_prefix, zip_bytes};
 const ENTRY_COUNT: usize = 18;
 
 fn requested_threads() -> usize {
-    std::env::var("FASTBZ2_THREADS").ok().map(|value| value.parse().expect("FASTBZ2_THREADS must be an integer")).unwrap_or(0)
+    std::env::var("FBZ_THREADS").ok().map(|value| value.parse().expect("FBZ_THREADS must be an integer")).unwrap_or(0)
 }
 
 #[derive(Clone, Copy)]
@@ -71,8 +71,8 @@ impl Fixture {
     }
 }
 
-fn fastbz2_command(input: &std::path::Path, output: &std::path::Path) -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_fastbz2"));
+fn fbz_command(input: &std::path::Path, output: &std::path::Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_fbz"));
     command.args(["-q", "-P", &requested_threads().to_string(), "-C"]).arg(output).arg(input);
     command
 }
@@ -89,19 +89,19 @@ fn timed(command: &mut Command) -> Duration {
     start.elapsed()
 }
 
-fn benchmark(shape: Shape, fastbz2: bool) {
+fn benchmark(shape: Shape, fbz: bool) {
     let fixture = Fixture::new(shape);
     let warm = fixture.directory.path().join("warm");
     let measured = fixture.directory.path().join("measured");
-    let warm_time = if fastbz2 { timed(&mut fastbz2_command(&fixture.input, &warm)) } else { timed(&mut unzip_command(&fixture.input, &warm)) };
-    let elapsed = if fastbz2 { timed(&mut fastbz2_command(&fixture.input, &measured)) } else { timed(&mut unzip_command(&fixture.input, &measured)) };
+    let warm_time = if fbz { timed(&mut fbz_command(&fixture.input, &warm)) } else { timed(&mut unzip_command(&fixture.input, &warm)) };
+    let elapsed = if fbz { timed(&mut fbz_command(&fixture.input, &measured)) } else { timed(&mut unzip_command(&fixture.input, &measured)) };
     fixture.verify(&measured);
-    eprintln!("{}: warm {warm_time:.3?}, measured {elapsed:.3?}", if fastbz2 { "fastbz2" } else { "Info-ZIP unzip 6.00 (Apple)" });
+    eprintln!("{}: warm {warm_time:.3?}, measured {elapsed:.3?}", if fbz { "fbz" } else { "Info-ZIP unzip 6.00 (Apple)" });
 }
 
 #[test]
 #[ignore = "local single-run one-entry ZIP extraction benchmark"]
-fn zip_single_fastbz2() {
+fn zip_single_fbz() {
     benchmark(Shape::Single, true);
 }
 
@@ -113,7 +113,7 @@ fn zip_single_unzip() {
 
 #[test]
 #[ignore = "local single-run many-entry ZIP extraction benchmark"]
-fn zip_many_fastbz2() {
+fn zip_many_fbz() {
     benchmark(Shape::Many, true);
 }
 
@@ -126,14 +126,14 @@ fn zip_many_unzip() {
 #[test]
 #[cfg(unix)]
 #[ignore = "local ZIP extraction time and peak-memory benchmark"]
-fn zip_many_fastbz2_process_metrics() {
+fn zip_many_fbz_process_metrics() {
     let fixture = Fixture::new(Shape::Many);
     let output = fixture.directory.path().join("measured");
-    let metrics = common::measure(&mut fastbz2_command(&fixture.input, &output)).unwrap();
+    let metrics = common::measure(&mut fbz_command(&fixture.input, &output)).unwrap();
     assert!(metrics.status.success());
     fixture.verify(&output);
     eprintln!(
-        "fastbz2 ZIP: wall {:.3}s, CPU {:.3}s user + {:.3}s system, peak RSS {:.1} MiB, peak physical footprint {:.1} MiB",
+        "fbz ZIP: wall {:.3}s, CPU {:.3}s user + {:.3}s system, peak RSS {:.1} MiB, peak physical footprint {:.1} MiB",
         metrics.wall.as_secs_f64(),
         metrics.user.as_secs_f64(),
         metrics.system.as_secs_f64(),

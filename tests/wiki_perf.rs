@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use fastbz2::{DecodeOptions, Source, decompress, decompress_to_writer};
+use fbz::{DecodeOptions, Source, decompress, decompress_to_writer};
 
 const FIVE_PERCENT_LEN: usize = 84_423_012;
 const FIVE_PERCENT_BLAKE3: &str = "69f41f28dc8ac74509d368c6aaec02f3cdf891c9da4ccf8caf625687dcd61908";
@@ -35,7 +35,7 @@ fn corpus_path(name: &str) -> std::path::PathBuf {
 }
 
 fn requested_threads() -> usize {
-    std::env::var("FASTBZ2_THREADS").ok().map(|value| value.parse().expect("FASTBZ2_THREADS must be an integer")).unwrap_or(0)
+    std::env::var("FBZ_THREADS").ok().map(|value| value.parse().expect("FBZ_THREADS must be an integer")).unwrap_or(0)
 }
 
 fn physical_footprint_mib(metrics: &common::ProcessMetrics) -> f64 {
@@ -73,7 +73,7 @@ fn print_process_metrics(label: &str, metrics: &common::ProcessMetrics) {
     );
 }
 
-fn timed_fastbz2(path: &Path, threads: usize) -> Duration {
+fn timed_fbz(path: &Path, threads: usize) -> Duration {
     let start = Instant::now();
     let source = Source::open(path).unwrap();
     let mut output = CountingSink::default();
@@ -109,8 +109,8 @@ fn simplewiki_full() {
     let path = corpus_path("simplewiki-full.xml.bz2");
     let options = DecodeOptions { threads: requested_threads(), ..DecodeOptions::default() };
 
-    let elapsed = timed_fastbz2(&path, options.threads);
-    eprintln!("fastbz2 ({} threads): {elapsed:.3?}", options.resolved_threads());
+    let elapsed = timed_fbz(&path, options.threads);
+    eprintln!("fbz ({} threads): {elapsed:.3?}", options.resolved_threads());
 }
 
 #[test]
@@ -118,10 +118,10 @@ fn simplewiki_full() {
 #[ignore = "local full SimpleWiki subprocess time and peak-memory benchmark"]
 fn simplewiki_cli_process_metrics() {
     let path = corpus_path("simplewiki-full.xml.bz2");
-    let mut command = validation_command(env!("CARGO_BIN_EXE_fastbz2"), &path, requested_threads());
+    let mut command = validation_command(env!("CARGO_BIN_EXE_fbz"), &path, requested_threads());
     let metrics = common::measure(&mut command).unwrap();
     assert!(metrics.status.success());
-    print_process_metrics("fastbz2 bzip2", &metrics);
+    print_process_metrics("fbz bzip2", &metrics);
 }
 
 #[test]
@@ -130,11 +130,11 @@ fn simplewiki_cli_process_metrics() {
 fn gzip_cli_process_metrics() {
     let path = corpus_path("simplewiki-full.xml.gz");
     let threads = requested_threads();
-    let mut command = validation_command(env!("CARGO_BIN_EXE_fastbz2"), &path, threads);
+    let mut command = validation_command(env!("CARGO_BIN_EXE_fbz"), &path, threads);
     let metrics = common::measure(&mut command).unwrap();
     assert!(metrics.status.success());
     let threads = if threads == 0 { "auto".to_owned() } else { threads.to_string() };
-    print_process_metrics(&format!("fastbz2 gzip ({threads} threads)"), &metrics);
+    print_process_metrics(&format!("fbz gzip ({threads} threads)"), &metrics);
 }
 
 #[test]
@@ -167,16 +167,16 @@ fn rapidgzip_rust_process_metrics() {
 
 #[test]
 #[cfg(unix)]
-#[ignore = "local single-run fastbz2 full gzip validation"]
-fn gzip_fastbz2_validation() {
+#[ignore = "local single-run fbz full gzip validation"]
+fn gzip_fbz_validation() {
     let path = corpus_path("simplewiki-full.xml.gz");
     let warm_path = corpus_path("simplewiki-first-5pct.xml.gz");
     let threads = requested_threads();
-    let binary = env!("CARGO_BIN_EXE_fastbz2");
+    let binary = env!("CARGO_BIN_EXE_fbz");
     warm_validation(binary, &warm_path, threads);
     let result = timed_validation(binary, &path, threads);
     assert!(result.status.success());
-    eprintln!("fastbz2 full gzip: {:.3}s", result.wall.as_secs_f64());
+    eprintln!("fbz full gzip: {:.3}s", result.wall.as_secs_f64());
 }
 
 #[test]
@@ -186,7 +186,7 @@ fn gzip_reference_ratio() {
     let path = corpus_path("simplewiki-full.xml.gz");
     let warm_path = corpus_path("simplewiki-first-5pct.xml.gz");
     let threads = requested_threads();
-    let ours_binary = env!("CARGO_BIN_EXE_fastbz2");
+    let ours_binary = env!("CARGO_BIN_EXE_fbz");
     let reference_binary = rapidgzip_binary();
 
     warm_validation(ours_binary, &warm_path, threads);
@@ -198,8 +198,8 @@ fn gzip_reference_ratio() {
     assert!(reference.status.success());
 
     let ratio = ours.wall.as_secs_f64() / reference.wall.as_secs_f64();
-    eprintln!("fastbz2 {:.3}s / rapidgzip-rust {:.3}s = {ratio:.3}x", ours.wall.as_secs_f64(), reference.wall.as_secs_f64());
-    assert!(ratio <= 1.2, "fastbz2 must remain within 20% of rapidgzip-rust; measured {ratio:.3}x");
+    eprintln!("fbz {:.3}s / rapidgzip-rust {:.3}s = {ratio:.3}x", ours.wall.as_secs_f64(), reference.wall.as_secs_f64());
+    assert!(ratio <= 1.2, "fbz must remain within 20% of rapidgzip-rust; measured {ratio:.3}x");
 }
 
 fn timed_vec(name: &str, decode: impl FnOnce() -> Vec<u8>) {
@@ -217,10 +217,10 @@ fn enwiki_fixture() -> (Vec<u8>, usize) {
 
 #[test]
 #[ignore = "local enwiki multistream performance comparison"]
-fn enwiki_first_1000_fastbz2_parallel() {
+fn enwiki_first_1000_fbz_parallel() {
     let (encoded, threads) = enwiki_fixture();
     let options = DecodeOptions { threads, ..DecodeOptions::default() };
-    timed_vec(&format!("fastbz2 parallel ({} threads)", options.resolved_threads()), || decompress(&encoded, options).unwrap());
+    timed_vec(&format!("fbz parallel ({} threads)", options.resolved_threads()), || decompress(&encoded, options).unwrap());
 }
 
 #[test]
@@ -232,9 +232,9 @@ fn enwiki_first_1000_crabz2_parallel() {
 
 #[test]
 #[ignore = "local enwiki multistream performance comparison"]
-fn enwiki_first_1000_fastbz2_serial() {
+fn enwiki_first_1000_fbz_serial() {
     let (encoded, _) = enwiki_fixture();
-    timed_vec("fastbz2 serial", || decompress(&encoded, DecodeOptions { threads: 1, ..DecodeOptions::default() }).unwrap());
+    timed_vec("fbz serial", || decompress(&encoded, DecodeOptions { threads: 1, ..DecodeOptions::default() }).unwrap());
 }
 
 #[test]

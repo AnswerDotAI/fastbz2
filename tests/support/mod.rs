@@ -1,6 +1,6 @@
 use std::{fs, io::Write, path::Path};
 
-use fastbz2::{DecodeOptions, decompress};
+use fbz::{DecodeOptions, decompress};
 use flate2::{Compression, write::DeflateEncoder};
 
 #[derive(Clone, Copy)]

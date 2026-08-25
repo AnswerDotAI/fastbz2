@@ -9,8 +9,10 @@ pub mod deflate;
 mod error;
 mod format;
 pub mod gzip;
+mod history;
 mod index;
 mod indexed;
+pub mod lz4;
 mod output;
 mod pipeline;
 mod source;
@@ -43,7 +45,7 @@ mod python {
         types::PyBytes,
     };
 
-    create_exception!(fastbz2, BadBzip2File, PyOSError);
+    create_exception!(fbz, BadBzip2File, PyOSError);
 
     fn python_error(error: crate::Error) -> PyErr {
         match error {

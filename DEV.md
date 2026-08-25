@@ -1,6 +1,6 @@
 # Development
 
-`fastbz2` is a mixed Rust/PyO3 project. The Rust crate is the implementation and public Rust API; `python/fastbz2/` is the public Python package over the private `fastbz2._core` extension.
+`fbz` is a mixed Rust/PyO3 project. The Rust crate is the implementation and public Rust API; `python/fbz/` is the public Python package over the private `fbz._core` extension.
 
 ## Architecture
 
@@ -13,16 +13,18 @@ src/decoder.rs        bzip2 block machinery and 12-bit Huffman fast tables
 src/format.rs         cheap structural scan for header and marker candidates
 src/gzip.rs           gzip framing, LSB-first DEFLATE implementation, CRC32, and reports
 src/deflate.rs        format-neutral raw-DEFLATE API shared by gzip and ZIP
+src/lz4.rs            safe LZ4 frame/block decoder and independent-block scheduling
+src/history.rs        shared overlapping LZ back-reference expansion
 src/output.rs         owned/borrowed decoded-output sink abstraction
 src/pipeline.rs       shared ordered, byte-budgeted, staged worker scheduler
 src/index.rs           stable persistent index format
 src/indexed.rs         seekable decoded view and block cache
 src/lib.rs            public Rust API and private PyO3 binding
 src/source.rs         owned and memory-mapped compressed sources
-src/bin/fastbz2/archive_extract.rs shared same-filesystem staging and atomic commit
-src/bin/fastbz2/tar_extract.rs  bounded decode-to-tar bridge
-src/bin/fastbz2/zip_extract.rs  ZIP parsing policy and adaptive entry extraction
-python/fastbz2/       thin Python I/O wrapper over fastbz2._core
+src/bin/fbz/archive_extract.rs shared same-filesystem staging and atomic commit
+src/bin/fbz/tar_extract.rs  bounded decode-to-tar bridge
+src/bin/fbz/zip_extract.rs  ZIP parsing policy and adaptive entry extraction
+python/fbz/       thin Python I/O wrapper over fbz._core
 build_backend.py      stage the native CLI for PEP 517 wheel builds
 tests/corpus/         selected upstream conformance and corruption fixtures
 tests/                Rust CLI/corpus and Python API integration tests
@@ -33,19 +35,21 @@ The current bzip2 scanner deliberately does not treat 48-bit marker matches or l
 
 The gzip decoder is an in-repo RFC 1952/RFC 1951 implementation rather than a wrapper around a production codec. It parses optional headers and concatenated members, decodes stored/fixed/dynamic blocks, maintains the 32 KiB LZ77 history, and validates FHCRC, CRC32, and ISIZE. For large inputs, independently discovered dynamic-block boundaries seed unknown history with compact markers. Primary jobs compute the CRC of each known clean suffix before ordered resolution. Resolution workers resolve the marker prefix, hash that prefix, and combine the two CRCs without rescanning the clean bytes. A marker-free history switches the same decoder to byte output. Reports retain member boundaries, DEFLATE block ranges, and accepted/fallback chunk counts. `crc32fast` is the sole production helper; `flate2` is dev-only.
 
-The decoder remains independent of files, threads, Python, and the CLI. Parallel scanning/decoding and indexed seeking are layered over it. Native workers never call Python. Large offsets use explicit 64-bit bit/byte types, and speculative block-marker hits are accepted only when they form an exact stream chain with valid block and combined stream CRCs.
+The decoder remains independent of files, Python, and the CLI. Parallel scanning/decoding and indexed seeking are layered over it. Native workers never call Python. Large offsets use explicit 64-bit bit/byte types, and speculative block-marker hits are accepted only when they form an exact stream chain with valid block and combined stream CRCs.
 
-Core decode APIs report completed compressed and decoded byte counts without knowing anything about terminals. The CLI selects bzip2, gzip, or ZIP by a recognised extension and falls back to magic for stdin or unknown names. It layers delayed, rate-limited TTY progress rendering over the shared callbacks; redirected stderr and `--quiet` produce no progress output. Decoded files use same-directory temporary files and atomic persistence, then inherit the compressed input's modification time and permissions. `--rm` removes an input only after decode, persistence, and metadata copying all succeed. An `OutputSink` wrapper enforces output-size limits, so each decoder has one code path for files, stdout, validation, listing, and archive extraction.
+Core decode APIs report completed compressed and decoded byte counts without knowing anything about terminals. The CLI selects bzip2, gzip, LZ4, or ZIP by a recognised extension and falls back to magic for stdin or unknown names. It layers delayed, rate-limited TTY progress rendering over the shared callbacks; redirected stderr and `--quiet` produce no progress output. Decoded files use same-directory temporary files and atomic persistence, then inherit the compressed input's modification time and permissions. `--rm` removes an input only after decode, persistence, and metadata copying all succeed. An `OutputSink` wrapper enforces output-size limits, so each decoder has one code path for files, stdout, validation, listing, and archive extraction.
+
+The LZ4 decoder parses current frames, concatenation, and skippable frames itself. It validates descriptor bits and XXH32 header, block, and content checksums, and bounds every literal and match before writing. Independent compressed blocks become ordinary `pipeline::Job`s, reserving the frame's declared maximum decoded block size; stored blocks borrow their source bytes and reserve no decoded allocation. Frames containing only stored blocks without block checksums bypass the worker pool because their only remaining work is ordered output and optional content hashing. Retained results remain charged at their allocation capacity rather than logical length, so highly compressible blocks cannot understate memory use. The coordinator commits results in source order and updates the content checksum. Linked frames use the same parser, block decoder, output sink, progress, and report path, but decode serially with a rolling 64 KiB history. This is one code path with a scheduling branch, not separate serial and parallel implementations. Concatenated frames currently run in frame order; parallelising across small independent frames is a possible measured optimization, not pre-built machinery.
 
 Tar format semantics use the mature `tar` crate, pinned from 0.4.46 and built without its optional xattr feature. It handles streaming GNU/PAX/long-name/link entries and confines extracted paths to the destination. A zero-capacity rendezvous channel transfers each owned decoder chunk and its live suffix offset to `tar::Archive`. The channel queues no chunks and applies backpressure. `tar::Archive` pulls data through `Read`, which copies once from the current chunk into its request buffer. Extraction writes immediately into a same-filesystem temporary directory, drains all trailing tar padding so codec validation completes, then preflights every destination conflict and moves entries into place with renames. Multiple inputs remain sequential so their per-codec worker pools cannot oversubscribe the global thread budget.
 
-ZIP structure semantics use `zip` 8.6.0 with all codec features disabled. The crate parses the central directory, Zip64 fields, data descriptors, names, modes, symlink kinds, and timestamp extra fields; fastbz2 reads each raw stored/DEFLATE range and sends it through its own validated codec path. Because the crate intentionally collapses duplicate raw names into its index map, a small bounds-checked central-record count detects and rejects that ambiguity before using its metadata. Parsing also rejects encryption, unsupported methods, escaping or equivalent paths, non-directory ancestors, overlapping data ranges, and ranges crossing the central directory. An aggregate declared-size check runs before extraction, and a per-entry sink prevents output exceeding its declaration before size and CRC32 are checked. ZIP and tar share the same staging/preflight/rename implementation.
+ZIP structure semantics use `zip` 8.6.0 with all codec features disabled. The crate parses the central directory, Zip64 fields, data descriptors, names, modes, symlink kinds, and timestamp extra fields; fbz reads each raw stored/DEFLATE range and sends it through its own validated codec path. Because the crate intentionally collapses duplicate raw names into its index map, a small bounds-checked central-record count detects and rejects that ambiguity before using its metadata. Parsing also rejects encryption, unsupported methods, escaping or equivalent paths, non-directory ancestors, overlapping data ranges, and ranges crossing the central directory. An aggregate declared-size check runs before extraction, and a per-entry sink prevents output exceeding its declaration before size and CRC32 are checked. ZIP and tar share the same staging/preflight/rename implementation.
 
 ZIP scheduling deliberately uses one parallelism level at a time. A sole DEFLATE entry at least 16 MiB compressed, or an entry at least 64 MiB in a multi-entry archive, uses all requested workers inside the raw DEFLATE decoder. Remaining entries run serial inner decoders concurrently on one Rayon pool. This keeps thread ownership and memory behaviour obvious, avoids nested oversubscription, and lets many ordinary entries naturally absorb stragglers through work stealing.
 
-The shared `pipeline.rs` scheduler provides ordered results, byte-budgeted admission, cancellation, and a staged priority queue. Bzip2 uses the rolling candidate path: workers reserve the maximum possible decoded block size, then shrink that reservation to actual retained output until ordered validation consumes or rejects it. Gzip uses the staged path: native workers alternate speculative DEFLATE decoding with higher-priority marker resolution, while the coordinator advances only the 32 KiB dependency windows and emits resolved chunks in order. Decode results and outstanding resolution results have separate bounded horizons, preventing either dependency stalls or unbounded memory.
+The shared `pipeline.rs` scheduler provides ordered results, byte-budgeted admission, cancellation, and a staged priority queue. Bzip2 uses the rolling candidate path: workers reserve the maximum possible decoded block size, then shrink that reservation to actual retained output until ordered validation consumes or rejects it. Gzip uses the staged path: native workers alternate speculative DEFLATE decoding with higher-priority marker resolution, while the coordinator advances only the 32 KiB dependency windows and emits resolved chunks in order. LZ4 independent blocks use the simpler ordered-job path and charge each retained allocation against the budget. Decode results and outstanding resolution results have bounded horizons, preventing dependency stalls from causing unbounded memory.
 
-The bzip2 decoder is safe scalar Rust designed for LLVM auto-vectorisation. Huffman decoding uses a 4096-entry direct table for codes up to 12 bits and canonical fallback for longer codes. Gzip uses full canonical lookup tables packed into `u16`, a branch-free 64 KiB marker-resolution lookup for large chunks, and `crc32fast::Hasher::combine` so CRC scanning runs with the resolution workers rather than serially in the coordinator. The only unsafe codec operation marks a just-initialized `Vec` result as initialized after writing every spare-capacity byte. Add architecture-specific SIMD or further cross-codec abstraction only after profiling; `libbz2-rs-sys` and `flate2` remain dev-only differential oracles.
+The bzip2 decoder is safe scalar Rust designed for LLVM auto-vectorisation. Huffman decoding uses a 4096-entry direct table for codes up to 12 bits and canonical fallback for longer codes. Gzip uses full canonical lookup tables packed into `u16`, a branch-free 64 KiB marker-resolution lookup for large chunks, and `crc32fast::Hasher::combine` so CRC scanning runs with the resolution workers rather than serially in the coordinator. Gzip byte/marker output and LZ4 share `history::extend_match`, whose doubling copies handle overlapping matches in logarithmically many operations; format-specific history validation remains at each call site. The only unsafe codec operation marks a just-initialized `Vec` result as initialized after writing every spare-capacity byte. Add architecture-specific SIMD or further cross-codec abstraction only after profiling; `libbz2-rs-sys`, `flate2`, and `lz4_flex` remain dev-only differential oracles.
 
 ## Commands
 
@@ -55,7 +59,7 @@ cargo test --release
 cargo check --all-features
 cargo build --release --bins
 python tools/stage_binaries.py
-maturin develop --release
+uv pip install --reinstall --no-deps -e .
 pytest -q
 ship-rs-build
 ```
@@ -64,68 +68,94 @@ Run `cargo fmt --check` after Rust edits and `chkstyle` after Python edits once 
 
 ## Correctness and performance acceptance
 
-The normal release test path decodes selected valid and corrupt cases from the maintained upstream `bzip2-testfiles` collection. Generated byte distributions add differential coverage. Valid bzip2 outputs are compared byte-for-byte with `libbz2-rs-sys`. Gzip and raw-DEFLATE tests cover stored, fixed-Huffman, and dynamic-Huffman blocks; optional headers and FHCRC; concatenated members; exact end-of-stream boundaries; truncation; and trailer corruption across varied inputs and compression levels generated by `flate2`. Both oracles are dev-only and never part of production decoding. CLI tests generate tar and ZIP archives and cover wrappers and extension dispatch, stored/DEFLATE entries, Zip64 and streaming descriptors, metadata and safe symlinks, stdin, raw-tar output, output limits, overwrite preflight, late checksum failure, atomicity, and traversal confinement.
+User-facing comparisons between installable CLIs are recorded only in [README Performance](README.md#performance). This file documents fixture reproduction, regression gates, and implementation-oriented diagnostics.
+
+The normal release test path decodes selected valid and corrupt cases from the maintained upstream `bzip2-testfiles` collection. Generated byte distributions add differential coverage. Valid bzip2 outputs are compared byte-for-byte with `libbz2-rs-sys`. Gzip and raw-DEFLATE tests cover stored, fixed-Huffman, and dynamic-Huffman blocks; optional headers and FHCRC; concatenated members; exact end-of-stream boundaries; truncation; and trailer corruption across varied inputs and compression levels generated by `flate2`. LZ4 tests use `lz4_flex` to generate a matrix spanning empty, repetitive, byte-distribution, and pseudorandom inputs; all four standard block sizes; independent and linked blocks; and every checksum/content-size combination. The production decoders do not depend on any oracle. CLI tests additionally cover LZ4 extension/magic dispatch, reports, limits, corruption, and `.tar.lz4` streaming extraction alongside the existing bzip2, gzip, tar, and ZIP policy cases.
 
 The normal release path contains warmed end-to-end performance regression gates capped at 1.3 times each oracle, allowing for noise on shared runners. The gzip gates independently exercise a highly compressible LZ77-heavy shape and an incompressible literal-heavy shape against `flate2`; the bzip2 gate uses `libbz2-rs-sys`. Representative local acceptance remains 1.2 times the corresponding oracle. The ignored full-wiki gzip test applies that threshold to rapidgzip-rust. Keep the whole release test suite below five seconds on the primary development laptop; individual timed workloads should normally be about 0.1 seconds or less.
+
+### Local LZ4 benchmark reproduction and diagnostics
+
+`tests/lz4_perf.rs` decodes `meta/simplewiki-first-5pct.xml.bz2` before timing, then uses dev-only `lz4_flex` to create a standard Max4MB independent-block LZ4 frame with a content checksum. Fixture construction and both warm-ups are outside the measured intervals. One test then measures exactly one validation run of each CLI and records child-process memory without task-inspection permissions:
+
+```bash
+cargo test --release --test lz4_perf lz4_cli_comparison -- --ignored --exact --nocapture
+cargo test --release --test lz4_perf lz4_thread_sweep -- --ignored --exact --nocapture
+```
+
+Regenerate the underlying SimpleWiki fixture using the shared instructions in [Local Wikipedia benchmarks](#local-wikipedia-benchmarks); no `.lz4` fixture is stored. This section retains only implementation diagnostics.
+
+The one-measurement-per-count scaling diagnostic explains the four-worker automatic limit:
+
+| Workers | Validation | Peak RSS |
+|---:|---:|---:|
+| 1 | 109.727 ms | 46.5 MiB |
+| 2 | 54.995 ms | 58.9 MiB |
+| 4 | 51.367 ms | 71.0 MiB |
+| 6 | 55.286 ms | 79.2 MiB |
+| 8 | 52.010 ms | 87.2 MiB |
+| 12 | 55.300 ms | 103.4 MiB |
+| 18 | 51.915 ms | 124.2 MiB |
+
+Four workers are at the front of the noisy plateau while using much less memory than 8–18. Automatic mode therefore uses at most four LZ4 workers; an explicit `-P N` still requests exactly `N`.
+
+`lz4_shape_diagnostics` isolates the two simple structural experiments:
+
+```bash
+cargo test --release --test lz4_perf lz4_shape_diagnostics -- --ignored --exact --nocapture
+```
+
+Replacing LZ4's offset-sized copy loop with the shared exponential back-reference expander reduced a single 4 MiB long-match decode from 10.588 ms to 0.278 ms. On a 16 MiB stored-only frame, the old worker path took 1.425 ms; bypassing its no-work pool took 1.286 ms, essentially flat in speed but with no unnecessary threads. Both figures are single measured runs after one warm-up per path.
 
 ### Local archive extraction benchmarks
 
 `tests/archive_perf.rs` measures the tar layer on the real `meta/simplewiki-first-5pct.xml.bz2` corpus. Fixture decoding and gzip/bzip2 recompression finish before timing. Each ignored test warms one target and measures it once. Run only the implementation changed:
 
 ```bash
-cargo test --release --test archive_perf tgz_fastbz2_overhead -- --ignored --exact --nocapture
+cargo test --release --test archive_perf tgz_fbz_overhead -- --ignored --exact --nocapture
 cargo test --release --test archive_perf tgz_system_reference -- --ignored --exact --nocapture
-cargo test --release --test archive_perf tbz2_fastbz2_overhead -- --ignored --exact --nocapture
+cargo test --release --test archive_perf tbz2_fbz_overhead -- --ignored --exact --nocapture
 cargo test --release --test archive_perf tbz2_system_reference -- --ignored --exact --nocapture
 cargo test --release --test archive_perf tar_crate_reference -- --ignored --exact --nocapture
 cargo test --release --test archive_perf tgz_output_cadence -- --ignored --exact --nocapture
 ```
 
-These are single runs after owned-suffix transfer and the 512 KiB gzip grid change:
+These are the internal overhead measurements after owned-suffix transfer and the 512 KiB gzip grid change:
 
-| Format | Raw decode | fastbz2 extraction | Extraction/raw | System `tar` | Extraction/system |
-|---|---:|---:|---:|---:|---:|
-| `.tgz` | 39.919 ms | 56.850 ms | 1.424x | 117.962 ms | 0.482x |
-| `.tar.bz2` | 148.411 ms | 151.783 ms | 1.023x | 1.168 s | 0.130x |
+| Format | Raw decode | Extraction/raw |
+|---|---:|---:|
+| `.tgz` | 39.919 ms | 1.424x |
+| `.tar.bz2` | 148.411 ms | 1.023x |
 
-Direct extraction of the uncompressed in-memory tar through the `tar` crate took 32.069 ms. Raw gzip decode plus direct tar extraction totals 71.988 ms. The combined pipeline takes 56.850 ms and hides 15.138 ms, or 47%, of the direct tar work.
+Direct extraction of the uncompressed in-memory tar through the `tar` crate took 32.069 ms. Raw gzip decode plus direct tar extraction totals 71.988 ms. The combined pipeline hides 15.138 ms, or 47%, of the direct tar work.
 
-The cadence benchmark identified ordered gzip output as the main overlap limit. With a 1 MiB speculative grid, output began at 8.491 ms, reached 25% at 29.595 ms, and completed at 33.724 ms. A 512 KiB grid began at 4.798 ms, reached 25% at 23.993 ms, and completed at 32.915 ms. A 256 KiB grid emitted earlier but slowed raw decode to 38.073 ms and extraction to 57.792 ms. The 512 KiB grid gave the best measured balance. Computing each clean suffix CRC in its primary job moved 25% output to 19.818 ms, 75% to 30.355 ms, and completion to 30.678 ms. The corresponding extraction run was effectively flat at 56.850 ms. Tar cannot process later bytes while an earlier ordered gzip segment remains incomplete. A custom tar parser would not remove that dependency. A one-chunk channel buffer regressed extraction to 59.698 ms, so the bridge retains its zero-capacity rendezvous.
+The cadence benchmark identified ordered gzip output as the main overlap limit. With a 1 MiB speculative grid, output began at 8.491 ms, reached 25% at 29.595 ms, and completed at 33.724 ms. A 512 KiB grid began at 4.798 ms, reached 25% at 23.993 ms, and completed at 32.915 ms. A 256 KiB grid emitted earlier but slowed raw decode to 38.073 ms and extraction to 57.792 ms. The 512 KiB grid gave the best measured balance. Computing each clean suffix CRC in its primary job moved 25% output to 19.818 ms, 75% to 30.355 ms, and completion to 30.678 ms. The corresponding extraction run was effectively flat. Tar cannot process later bytes while an earlier ordered gzip segment remains incomplete. A custom tar parser would not remove that dependency. A one-chunk channel buffer regressed extraction to 59.698 ms, so the bridge retains its zero-capacity rendezvous.
 
-System `tar` remains the external reference and 1.2x remains the research target. Raw-tar output is a lower bound rather than an extractor reference. The fastbz2 tests use a broad 3x raw-decode regression guard. Keep the measurements single-run; change an implementation before rerunning it.
+Raw-tar output is a lower bound rather than an extractor reference. The fbz tests use a broad 3x raw-decode regression guard. Keep the measurements single-run; change an implementation before rerunning it.
 
-### Local ZIP benchmarks
+### Local ZIP benchmark reproduction
 
 `tests/zip_perf.rs` creates two deterministic ZIPs from the same 84,423,012-byte SimpleWiki prefix used by the tar benchmarks: one DEFLATE entry, and 18 equal-sized DEFLATE entries. `tests/support::simplewiki_prefix` decodes `meta/simplewiki-first-5pct.xml.bz2` before timing, and the ZIP builder then runs before timing. Thus regenerating the dataset is exactly the SimpleWiki 5% procedure below; no ZIP fixture is stored or needs hand-maintained lengths.
 
 Each speed test warms its selected executable once, measures it once, and verifies all extracted bytes. Run only the row whose implementation changed:
 
 ```bash
-cargo test --release --test zip_perf zip_single_fastbz2 -- --ignored --exact --nocapture
+cargo test --release --test zip_perf zip_single_fbz -- --ignored --exact --nocapture
 cargo test --release --test zip_perf zip_single_unzip -- --ignored --exact --nocapture
-cargo test --release --test zip_perf zip_many_fastbz2 -- --ignored --exact --nocapture
+cargo test --release --test zip_perf zip_many_fbz -- --ignored --exact --nocapture
 cargo test --release --test zip_perf zip_many_unzip -- --ignored --exact --nocapture
 ```
 
-The established external baseline is `UnZip 6.00 of 20 April 2009, by Info-ZIP, with modifications by Apple Inc.` The measured archive was 25.8 MiB and decoded to 80.5 MiB:
-
-| Shape | fastbz2 | Info-ZIP `unzip` | fastbz2/reference |
-|---|---:|---:|---:|
-| One entry | 35.571 ms | 355.235 ms | 0.100x |
-| 18 entries | 29.700 ms | 360.008 ms | 0.083x |
-
-Both fastbz2 measurements used the default automatic worker selection, resolving to 18 cores on the primary machine. `FASTBZ2_THREADS` is only an optional diagnostic override; normal tests and benchmarks should leave it unset so `-P 0` follows the machine automatically.
+`FBZ_THREADS` is an optional diagnostic override; normal tests and benchmarks should leave it unset so `-P 0` follows the machine automatically.
 
 The ungated child-process memory diagnostics use the same many-entry fixture:
 
 ```bash
-cargo test --release --test zip_perf zip_many_fastbz2_process_metrics -- --ignored --exact --nocapture
+cargo test --release --test zip_perf zip_many_fbz_process_metrics -- --ignored --exact --nocapture
 cargo test --release --test zip_perf zip_many_unzip_process_metrics -- --ignored --exact --nocapture
 ```
 
-The single sampled runs measured fastbz2 at 66.4 MiB peak RSS and 36.7 MiB physical footprint, versus `unzip` at 2.8 MiB RSS and 2.4 MiB physical footprint. That is the explicit cost of decoding 18 entries concurrently; it remains small in absolute terms and avoids the much larger speculative-history footprint of parallelising each small entry internally.
-
-Legacy randomized blocks produced by bzip2 versions before 0.9.5 are intentionally unsupported. Supporting that obsolete format would add complexity to the production decoder for data that is not realistically encountered today.
+These diagnostics quantify the memory cost of concurrent entry decoding without duplicating the user-facing results.
 
 ### Local Wikipedia benchmarks
 
@@ -135,20 +165,20 @@ This section retains in-process and library-oriented research comparisons that a
 
 | Decoder | Mode | Seconds |
 |---|---|---:|
-| fastbz2 | parallel, 18 threads, streaming sink | 2.515 |
+| fbz | parallel, 18 threads, streaming sink | 2.515 |
 | crabz2 0.4.0 | parallel | 4.460 |
 | bzip2 | serial CLI | 20.310 |
 | pbzip2 1.1.13 | CLI | 20.240 |
 | libbz2-rs 0.2.5 | serial, in process | 20.700 |
-| fastbz2 | serial, in process | 21.279 |
+| fbz | serial, in process | 21.279 |
 
 The first 1,000 streams of English Wikipedia (`654,362,682` bytes compressed, `2,715,335,085` bytes decoded, 99,853 pages) exercise scheduling across many short concatenated streams:
 
 | Decoder | Mode | Seconds |
 |---|---|---:|
 | crabz2 0.4.0 | parallel, in process | 3.815 |
-| fastbz2 | parallel, 18 threads, in process | 3.881 |
-| fastbz2 | serial, in process | 37.198 |
+| fbz | parallel, 18 threads, in process | 3.881 |
+| fbz | serial, in process | 37.198 |
 | crabz2 0.4.0 | serial, in process | 40.602 |
 | pbzip2 1.1.13 | 18-thread CLI + byte comparison | 88.080 |
 | bzip2 | serial CLI + byte comparison | 92.960 |
@@ -167,14 +197,14 @@ The full bzip2 confirmation streams to a counting sink and validates every block
 cargo test --release --test wiki_perf simplewiki_full -- --ignored --exact --nocapture
 ```
 
-The fastbz2-only gzip test warms with `meta/simplewiki-first-5pct.xml.gz` and performs one full-dump validation. The ratio test warms both executables, measures each full dump once, and fails above 1.2x the sibling rapidgzip-rust checkout:
+The fbz-only gzip test warms with `meta/simplewiki-first-5pct.xml.gz` and performs one full-dump validation. The ratio test warms both executables, measures each full dump once, and fails above 1.2x the sibling rapidgzip-rust checkout:
 
 ```bash
-cargo test --release --test wiki_perf gzip_fastbz2_validation -- --ignored --exact --nocapture
+cargo test --release --test wiki_perf gzip_fbz_validation -- --ignored --exact --nocapture
 cargo test --release --test wiki_perf gzip_reference_ratio -- --ignored --exact --nocapture
 ```
 
-The default selects available parallelism automatically. `FASTBZ2_THREADS` is an optional diagnostic override, and `RAPIDGZIP_BIN` can point at another reference executable. The warm-up is deliberately the small fixture, not an unreported repeat of the measured full workload.
+The default selects available parallelism automatically. `FBZ_THREADS` is an optional diagnostic override, and `RAPIDGZIP_BIN` can point at another reference executable. The warm-up is deliberately the small fixture, not an unreported repeat of the measured full workload.
 
 Time/CPU/RSS and ungated macOS physical-footprint diagnostics are separate because process inspection can perturb sub-second parallel timings:
 
@@ -188,13 +218,13 @@ The metrics helper uses `wait4` and, on macOS, `proc_pid_rusage`'s `ri_phys_foot
 The 1,000-stream enwiki comparison has a separate ignored test for each implementation and mode so a changed decoder can be measured without rerunning unchanged baselines. Each test reads the compressed fixture before starting its single timed decode, with no warmups or repeats:
 
 ```bash
-cargo test --release --test wiki_perf enwiki_first_1000_fastbz2_parallel -- --ignored --exact --nocapture
+cargo test --release --test wiki_perf enwiki_first_1000_fbz_parallel -- --ignored --exact --nocapture
 cargo test --release --test wiki_perf enwiki_first_1000_crabz2_parallel -- --ignored --exact --nocapture
-cargo test --release --test wiki_perf enwiki_first_1000_fastbz2_serial -- --ignored --exact --nocapture
+cargo test --release --test wiki_perf enwiki_first_1000_fbz_serial -- --ignored --exact --nocapture
 cargo test --release --test wiki_perf enwiki_first_1000_crabz2_serial -- --ignored --exact --nocapture
 ```
 
-It compares fastbz2 and crabz2 in parallel and serial modes. Automatic parallelism is the default; `FASTBZ2_THREADS` can give both parallel decoders an explicit count for a diagnostic comparison. Each implementation validates the bzip2 CRCs; the benchmark also checks the exact decoded length.
+It compares fbz and crabz2 in parallel and serial modes. Automatic parallelism is the default; `FBZ_THREADS` can give both parallel decoders an explicit count for a diagnostic comparison. Each implementation validates the bzip2 CRCs; the benchmark also checks the exact decoded length.
 
 The decoded lengths and the 5% BLAKE3 in `tests/wiki_perf.rs` are acceptance values, not parameters used by the decoder. They prevent a truncated decode from appearing artificially fast without reading a separate multi-gigabyte reference during each timed run. Regenerating a fixture requires independently validating it and updating the corresponding acceptance value.
 
@@ -233,7 +263,7 @@ Line 1000 is the start of stream 1001 because byte zero is stream 1 and is absen
 To create the separately useful well-formed parser fixture, append only the XML root close after decoding; those 13 bytes are deliberately excluded from `ENWIKI_1000_LEN`:
 
 ```bash
-fastbz2 "$wiki/data/enwiki-first-1000-streams.xml.bz2" -o "$wiki/data/enwiki-first-1000-streams.xml"
+fbz "$wiki/data/enwiki-first-1000-streams.xml.bz2" -o "$wiki/data/enwiki-first-1000-streams.xml"
 printf '</mediawiki>\n' >> "$wiki/data/enwiki-first-1000-streams.xml"
 xmllint --stream --noout "$wiki/data/enwiki-first-1000-streams.xml"
 ```
@@ -251,7 +281,7 @@ The thin PEP 517 backend delegates to Maturin after building and staging the nat
 ## Release
 
 1. Run `cargo build --release --bins && python tools/stage_binaries.py`.
-2. Run `maturin develop --release && pytest -q`.
+2. Run `uv pip install --reinstall --no-deps -e . && pytest -q` so the custom backend installs both the extension and native CLI.
 3. Confirm the release version in `Cargo.toml` (`[package].version`).
 4. Run `ship-release`.
 
