@@ -75,6 +75,17 @@ pub struct Report {
     pub fallback_chunks: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeflateReport {
+    pub source_len: u64,
+    pub compressed_end_bit: u64,
+    pub decoded_len: u64,
+    pub crc: u32,
+    pub blocks: Vec<Block>,
+    pub speculative_chunks: u64,
+    pub fallback_chunks: u64,
+}
+
 #[derive(Clone, Debug)]
 struct Header {
     deflate_start: usize,
@@ -125,26 +136,13 @@ pub fn decompress_to_sink_with_options_and_progress(
     options: DecodeOptions,
     mut progress: impl FnMut(DecodeProgress),
 ) -> Result<Report> {
-    let mut options = options.validate()?;
-    let threads = options.resolved_threads();
-    options.threads = threads;
-    if threads == 1 || data.len() < MIN_PARALLEL_INPUT || options.memory_limit < PARALLEL_JOB_MEMORY {
-        return decompress_serial_to_sink_with_progress(data, output, progress);
-    }
-    let header = parse_header(data, 0)?;
-    let first_grid = header.deflate_start.saturating_add(PARALLEL_GRID);
-    let initial_segment = match decode_segment(data, header.deflate_start * 8, first_grid.min(data.len()) * 8, InitialHistory::Empty, PARALLEL_OUTPUT_LIMIT) {
-        Ok(segment) => segment,
-        Err(_) => return decompress_serial_to_sink_with_progress(data, output, progress),
-    };
-    decompress_parallel_to_sink(data, output, options, threads, &mut progress, initial_segment)
-}
-
-fn decompress_serial_to_sink_with_progress(data: &[u8], output: &mut impl OutputSink, mut progress: impl FnMut(DecodeProgress)) -> Result<Report> {
+    let options = options.validate()?;
     let mut members = Vec::new();
     let mut blocks = Vec::new();
     let mut position = 0_usize;
     let mut decoded_total = 0_u64;
+    let mut speculative_total = 0_u64;
+    let mut fallback_total = 0_u64;
 
     while position < data.len() {
         if !members.is_empty() && data[position..].iter().all(|&byte| byte == 0) {
@@ -153,30 +151,30 @@ fn decompress_serial_to_sink_with_progress(data: &[u8], output: &mut impl Output
         let member_start = position;
         let header = parse_header(data, position)?;
         let member_number = u32::try_from(members.len()).map_err(|_| invalid("too many gzip members"))?;
-        let mut emitter = Emitter::new(output, decoded_total);
-        let mut bits = Bits::new(data, header.deflate_start);
-        decode_deflate(&mut bits, &mut emitter, member_number, &mut blocks, &mut progress)?;
-        bits.align_byte();
-        let trailer = bits.byte_position();
+        let stream = DeflateStream { start_byte: header.deflate_start, end_byte: data.len(), member: member_number, decoded_base: decoded_total };
+        let decoded = decompress_deflate_stream(data, stream, output, options, &mut progress)?;
+        let trailer = (decoded.compressed_end_bit as usize).div_ceil(8);
         let trailer_end = trailer.checked_add(8).ok_or_else(|| invalid("trailer offset overflow"))?;
         let trailer_bytes = data.get(trailer..trailer_end).ok_or_else(|| invalid_at(trailer, "truncated member trailer"))?;
         let expected_crc = u32::from_le_bytes(trailer_bytes[..4].try_into().unwrap());
         let expected_size = u32::from_le_bytes(trailer_bytes[4..].try_into().unwrap());
-        let (actual_crc, decoded_len) = emitter.finish()?;
-        if actual_crc != expected_crc {
-            return Err(invalid_at(trailer, format!("CRC32 mismatch: expected {expected_crc:08x}, decoded {actual_crc:08x}")));
+        if decoded.crc != expected_crc {
+            return Err(invalid_at(trailer, format!("CRC32 mismatch: expected {expected_crc:08x}, decoded {:08x}", decoded.crc)));
         }
-        if decoded_len as u32 != expected_size {
-            return Err(invalid_at(trailer + 4, format!("ISIZE mismatch: expected {expected_size}, decoded {}", decoded_len as u32)));
+        if decoded.decoded_len as u32 != expected_size {
+            return Err(invalid_at(trailer + 4, format!("ISIZE mismatch: expected {expected_size}, decoded {}", decoded.decoded_len as u32)));
         }
-        decoded_total = decoded_total.checked_add(decoded_len).ok_or_else(|| invalid("decoded offset overflow"))?;
+        decoded_total = decoded_total.checked_add(decoded.decoded_len).ok_or_else(|| invalid("decoded offset overflow"))?;
+        speculative_total += decoded.speculative_chunks;
+        fallback_total += decoded.fallback_chunks;
+        blocks.extend(decoded.blocks);
         position = trailer_end;
         members.push(Member {
             compressed_start: member_start as u64,
             deflate_start: header.deflate_start as u64,
             compressed_end: position as u64,
-            decoded_start: decoded_total - decoded_len,
-            decoded_len,
+            decoded_start: decoded_total - decoded.decoded_len,
+            decoded_len: decoded.decoded_len,
             expected_crc,
             mtime: header.mtime,
             extra_flags: header.extra_flags,
@@ -191,7 +189,33 @@ fn decompress_serial_to_sink_with_progress(data: &[u8], output: &mut impl Output
     }
     output.flush()?;
     progress(DecodeProgress { compressed_bytes: data.len() as u64, decoded_bytes: decoded_total });
-    Ok(Report { source_len: data.len() as u64, decoded_len: decoded_total, members, blocks, speculative_chunks: 0, fallback_chunks: 0 })
+    Ok(Report {
+        source_len: data.len() as u64,
+        decoded_len: decoded_total,
+        members,
+        blocks,
+        speculative_chunks: speculative_total,
+        fallback_chunks: fallback_total,
+    })
+}
+
+/// Decode one raw DEFLATE stream into an output that can take ownership of completed chunks.
+#[doc(hidden)]
+pub(crate) fn decompress_deflate_to_sink_with_options_and_progress(
+    data: &[u8],
+    output: &mut impl OutputSink,
+    options: DecodeOptions,
+    mut progress: impl FnMut(DecodeProgress),
+) -> Result<DeflateReport> {
+    let options = options.validate()?;
+    let stream = DeflateStream { start_byte: 0, end_byte: data.len(), member: 0, decoded_base: 0 };
+    let report = decompress_deflate_stream(data, stream, output, options, &mut progress)?;
+    if (report.compressed_end_bit as usize).div_ceil(8) != data.len() {
+        return Err(invalid_bit(report.compressed_end_bit as usize, "trailing data after final DEFLATE block"));
+    }
+    output.flush()?;
+    progress(DecodeProgress { compressed_bytes: data.len() as u64, decoded_bytes: report.decoded_len });
+    Ok(report)
 }
 
 #[derive(Clone, Copy)]
@@ -551,218 +575,173 @@ impl<'a, W: OutputSink + ?Sized, P: FnMut(DecodeProgress) + ?Sized> SegmentCommi
     }
 }
 
-fn decompress_parallel_to_sink(
+#[derive(Clone, Copy)]
+struct DeflateStream {
+    start_byte: usize,
+    end_byte: usize,
+    member: u32,
+    decoded_base: u64,
+}
+
+fn decompress_deflate_stream(
     data: &[u8],
+    stream: DeflateStream,
+    output: &mut impl OutputSink,
+    mut options: DecodeOptions,
+    progress: &mut impl FnMut(DecodeProgress),
+) -> Result<DeflateReport> {
+    let DeflateStream { start_byte, end_byte, member, decoded_base } = stream;
+    let data = data.get(..end_byte).ok_or_else(|| invalid("DEFLATE end exceeds input"))?;
+    if start_byte > end_byte {
+        return Err(invalid("DEFLATE start exceeds end"));
+    }
+    let threads = options.resolved_threads();
+    options.threads = threads;
+    if threads == 1 || end_byte - start_byte < MIN_PARALLEL_INPUT || options.memory_limit < PARALLEL_JOB_MEMORY {
+        return decompress_deflate_serial_stream(data, start_byte, output, member, decoded_base, progress);
+    }
+    let first_grid = start_byte.saturating_add(PARALLEL_GRID);
+    let initial_segment = match decode_segment(data, start_byte * 8, first_grid.min(end_byte) * 8, InitialHistory::Empty, PARALLEL_OUTPUT_LIMIT) {
+        Ok(segment) => segment,
+        Err(_) => return decompress_deflate_serial_stream(data, start_byte, output, member, decoded_base, progress),
+    };
+    decompress_deflate_parallel_stream(data, start_byte, end_byte, output, options, threads, member, decoded_base, progress, initial_segment)
+}
+
+fn decompress_deflate_serial_stream(
+    data: &[u8],
+    start_byte: usize,
+    output: &mut impl OutputSink,
+    member: u32,
+    decoded_base: u64,
+    progress: &mut impl FnMut(DecodeProgress),
+) -> Result<DeflateReport> {
+    let mut blocks = Vec::new();
+    let mut emitter = Emitter::new(output, decoded_base);
+    let mut bits = Bits::new(data, start_byte);
+    decode_deflate(&mut bits, &mut emitter, member, &mut blocks, progress)?;
+    let compressed_end_bit = bits.position_bits() as u64;
+    let (crc, decoded_len) = emitter.finish()?;
+    Ok(DeflateReport { source_len: (data.len() - start_byte) as u64, compressed_end_bit, decoded_len, crc, blocks, speculative_chunks: 0, fallback_chunks: 0 })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decompress_deflate_parallel_stream(
+    data: &[u8],
+    start_byte: usize,
+    end_byte: usize,
     output: &mut impl OutputSink,
     options: DecodeOptions,
     threads: usize,
+    member: u32,
+    decoded_base: u64,
     progress: &mut impl FnMut(DecodeProgress),
     initial_segment: Segment,
-) -> Result<Report> {
-    let mut members = Vec::new();
-    let mut blocks = Vec::new();
-    let mut position = 0;
-    let mut decoded_total = 0_u64;
-    let mut speculative_total = 0_u64;
-    let mut fallback_total = 0_u64;
-    let mut initial_segment = Some(initial_segment);
-
-    while position < data.len() {
-        if !members.is_empty() && data[position..].iter().all(|&byte| byte == 0) {
-            break;
-        }
-        let member_start = position;
-        let header = parse_header(data, position)?;
-        let member_number = u32::try_from(members.len()).map_err(|_| invalid("too many gzip members"))?;
-        let first_grid = header.deflate_start.saturating_add(PARALLEL_GRID);
-        let member_initial = match initial_segment.take() {
-            Some(segment) => segment,
-            None => match decode_segment(data, header.deflate_start * 8, first_grid.min(data.len()) * 8, InitialHistory::Empty, PARALLEL_OUTPUT_LIMIT) {
-                Ok(segment) => segment,
-                Err(_) => {
-                    let compressed_base = position as u64;
-                    let decoded_base = decoded_total;
-                    let member_base = u32::try_from(members.len()).map_err(|_| invalid("too many gzip members"))?;
-                    let mut suffix = decompress_serial_to_sink_with_progress(&data[position..], output, |item| {
-                        progress(DecodeProgress {
-                            compressed_bytes: compressed_base + item.compressed_bytes,
-                            decoded_bytes: decoded_base + item.decoded_bytes,
-                        });
-                    })?;
-                    for member in &mut suffix.members {
-                        member.compressed_start += compressed_base;
-                        member.deflate_start += compressed_base;
-                        member.compressed_end += compressed_base;
-                        member.decoded_start += decoded_base;
-                    }
-                    let compressed_base_bits = compressed_base.saturating_mul(8);
-                    for block in &mut suffix.blocks {
-                        block.member += member_base;
-                        block.compressed_start_bit += compressed_base_bits;
-                        block.compressed_end_bit += compressed_base_bits;
-                        block.decoded_start += decoded_base;
-                    }
-                    decoded_total = decoded_total.checked_add(suffix.decoded_len).ok_or_else(|| invalid("decoded offset overflow"))?;
-                    members.append(&mut suffix.members);
-                    blocks.append(&mut suffix.blocks);
-                    return Ok(Report {
-                        source_len: data.len() as u64,
-                        decoded_len: decoded_total,
-                        members,
-                        blocks,
-                        speculative_chunks: speculative_total,
-                        fallback_chunks: fallback_total,
-                    });
-                }
+) -> Result<DeflateReport> {
+    let per_job = PARALLEL_JOB_MEMORY;
+    let output_limit = PARALLEL_OUTPUT_LIMIT;
+    let horizon = threads.saturating_add(2);
+    let parallel_budget = options.memory_limit.min(per_job.saturating_mul(horizon));
+    let first_grid = start_byte.saturating_add(PARALLEL_GRID);
+    let mut jobs = Vec::new();
+    let mut key = 1;
+    let mut grid = first_grid;
+    while grid < end_byte {
+        jobs.push(Job {
+            key,
+            reservation: per_job,
+            payload: GzipJob {
+                search_start: grid * 8,
+                search_end: grid.saturating_add(2 * PARALLEL_GRID).min(end_byte) * 8,
+                stop_bit: grid.saturating_add(PARALLEL_GRID).min(end_byte) * 8,
+                output_limit,
             },
-        };
-        let per_job = PARALLEL_JOB_MEMORY;
-        let output_limit = PARALLEL_OUTPUT_LIMIT;
-        let horizon = options.resolved_threads().saturating_add(2);
-        let parallel_budget = options.memory_limit.min(per_job.saturating_mul(horizon));
-        let mut jobs = Vec::new();
-        let mut key = 1;
-        let mut grid = first_grid;
-        while grid < data.len() {
-            jobs.push(Job {
-                key,
-                reservation: per_job,
-                payload: GzipJob {
-                    search_start: grid * 8,
-                    search_end: grid.saturating_add(2 * PARALLEL_GRID).min(data.len()) * 8,
-                    stop_bit: grid.saturating_add(PARALLEL_GRID).min(data.len()) * 8,
-                    output_limit,
-                },
-            });
-            key += 1;
-            grid = grid.saturating_add(PARALLEL_GRID);
-        }
+        });
+        key += 1;
+        grid = grid.saturating_add(PARALLEL_GRID);
+    }
 
-        let (trailer, decoded_len, expected_crc, speculative_chunks, fallback_chunks) = run_staged_ordered(
-            threads,
-            &jobs,
-            PipelineLimits { memory: parallel_budget, active: horizon.saturating_mul(2) },
-            |job| run_gzip_job(data, job),
-            |result| result.as_ref().map_or(0, Segment::retained_bytes),
-            |task: ResolveTask| resolve_segment(task.segment, &task.predecessor),
-            |results| {
-                let mut predecessor = Vec::new();
-                let mut committer = SegmentCommitter::new(member_number, decoded_total, output, &mut blocks, progress);
-                let mut key = 1;
-                let mut resolve_sequence = 0;
-                let mut next_resolve = 0;
-                let mut outstanding = 0;
-                let mut speculative_chunks = 0_u64;
-                let mut fallback_chunks = 0_u64;
+    let mut blocks = Vec::new();
+    let (compressed_end_bit, decoded_len, crc, speculative_chunks, fallback_chunks) = run_staged_ordered(
+        threads,
+        &jobs,
+        PipelineLimits { memory: parallel_budget, active: horizon.saturating_mul(2) },
+        |job| run_gzip_job(data, job),
+        |result| result.as_ref().map_or(0, Segment::retained_bytes),
+        |task: ResolveTask| resolve_segment(task.segment, &task.predecessor),
+        |results| {
+            let mut predecessor = Vec::new();
+            let mut committer = SegmentCommitter::new(member, decoded_base, output, &mut blocks, progress);
+            let mut key = 1;
+            let mut resolve_sequence = 0;
+            let mut next_resolve = 0;
+            let mut outstanding = 0;
+            let mut speculative_chunks = 0_u64;
+            let mut fallback_chunks = 0_u64;
 
-                let mut segment = member_initial;
-                let mut next_start = segment.end_bit;
-                let mut final_block = segment.final_block;
-                let next_window = successor_window(&segment, &predecessor)?;
-                let resolved = resolve_segment(segment, &predecessor)?;
-                committer.commit(resolved)?;
-                predecessor = next_window;
+            let mut segment = initial_segment;
+            let mut next_start = segment.end_bit;
+            let mut final_block = segment.final_block;
+            let next_window = successor_window(&segment, &predecessor)?;
+            let resolved = resolve_segment(segment, &predecessor)?;
+            committer.commit(resolved)?;
+            predecessor = next_window;
 
-                while !final_block {
-                    let estimated_stop = header.deflate_start.saturating_add((key + 1) * PARALLEL_GRID).min(data.len()) * 8;
-                    let (lease, speculative) = results.take_primary(key)?;
-                    let accepted = matches!(&speculative, Ok(candidate) if candidate.start_bit == next_start);
-                    if !accepted {
-                        results.retire(lease);
-                        fallback_chunks += 1;
-                        while outstanding != 0 {
-                            let resolved = results.take_stage(next_resolve)??;
-                            committer.commit(resolved)?;
-                            next_resolve += 1;
-                            outstanding -= 1;
-                        }
-                        segment = decode_segment(data, next_start, estimated_stop, InitialHistory::Unknown, output_limit)?;
-                        next_start = segment.end_bit;
-                        final_block = segment.final_block;
-                        let next_window = successor_window(&segment, &predecessor)?;
-                        let resolved = resolve_segment(segment, &predecessor)?;
-                        committer.commit(resolved)?;
-                        predecessor = next_window;
-                        key += 1;
-                        continue;
-                    }
-
-                    speculative_chunks += 1;
-                    let segment = speculative.unwrap();
-                    next_start = segment.end_bit;
-                    final_block = segment.final_block;
-                    let next_window = successor_window(&segment, &predecessor)?;
-                    results.submit(resolve_sequence, lease, ResolveTask { segment, predecessor })?;
-                    predecessor = next_window;
-                    resolve_sequence += 1;
-                    outstanding += 1;
-                    key += 1;
-
-                    if outstanding >= threads {
+            while !final_block {
+                let estimated_stop = start_byte.saturating_add((key + 1) * PARALLEL_GRID).min(end_byte) * 8;
+                let (lease, speculative) = results.take_primary(key)?;
+                let accepted = matches!(&speculative, Ok(candidate) if candidate.start_bit == next_start);
+                if !accepted {
+                    results.retire(lease);
+                    fallback_chunks += 1;
+                    while outstanding != 0 {
                         let resolved = results.take_stage(next_resolve)??;
                         committer.commit(resolved)?;
                         next_resolve += 1;
                         outstanding -= 1;
                     }
+                    segment = decode_segment(data, next_start, estimated_stop, InitialHistory::Unknown, output_limit)?;
+                    next_start = segment.end_bit;
+                    final_block = segment.final_block;
+                    let next_window = successor_window(&segment, &predecessor)?;
+                    let resolved = resolve_segment(segment, &predecessor)?;
+                    committer.commit(resolved)?;
+                    predecessor = next_window;
+                    key += 1;
+                    continue;
                 }
 
-                while outstanding != 0 {
+                speculative_chunks += 1;
+                let segment = speculative.unwrap();
+                next_start = segment.end_bit;
+                final_block = segment.final_block;
+                let next_window = successor_window(&segment, &predecessor)?;
+                results.submit(resolve_sequence, lease, ResolveTask { segment, predecessor })?;
+                predecessor = next_window;
+                resolve_sequence += 1;
+                outstanding += 1;
+                key += 1;
+
+                if outstanding >= threads {
                     let resolved = results.take_stage(next_resolve)??;
                     committer.commit(resolved)?;
                     next_resolve += 1;
                     outstanding -= 1;
                 }
+            }
 
-                let trailer = next_start.div_ceil(8);
-                let trailer_end = trailer.checked_add(8).ok_or_else(|| invalid("trailer offset overflow"))?;
-                let trailer_bytes = data.get(trailer..trailer_end).ok_or_else(|| invalid_at(trailer, "truncated member trailer"))?;
-                let expected_crc = u32::from_le_bytes(trailer_bytes[..4].try_into().unwrap());
-                let expected_size = u32::from_le_bytes(trailer_bytes[4..].try_into().unwrap());
-                let SegmentCommitter { decoded: member_decoded, crc, .. } = committer;
-                let actual_crc = crc.finalize();
-                if actual_crc != expected_crc {
-                    return Err(invalid_at(trailer, format!("CRC32 mismatch: expected {expected_crc:08x}, decoded {actual_crc:08x}")));
-                }
-                if member_decoded as u32 != expected_size {
-                    return Err(invalid_at(trailer + 4, format!("ISIZE mismatch: expected {expected_size}, decoded {}", member_decoded as u32)));
-                }
-                Ok((trailer_end, member_decoded, expected_crc, speculative_chunks, fallback_chunks))
-            },
-        )?;
-        speculative_total += speculative_chunks;
-        fallback_total += fallback_chunks;
+            while outstanding != 0 {
+                let resolved = results.take_stage(next_resolve)??;
+                committer.commit(resolved)?;
+                next_resolve += 1;
+                outstanding -= 1;
+            }
 
-        decoded_total = decoded_total.checked_add(decoded_len).ok_or_else(|| invalid("decoded offset overflow"))?;
-        position = trailer;
-        members.push(Member {
-            compressed_start: member_start as u64,
-            deflate_start: header.deflate_start as u64,
-            compressed_end: position as u64,
-            decoded_start: decoded_total - decoded_len,
-            decoded_len,
-            expected_crc,
-            mtime: header.mtime,
-            extra_flags: header.extra_flags,
-            operating_system: header.operating_system,
-            name: header.name,
-            comment: header.comment,
-        });
-        progress(DecodeProgress { compressed_bytes: position as u64, decoded_bytes: decoded_total });
-    }
-
-    if members.is_empty() {
-        return Err(invalid("input contains no gzip members"));
-    }
-    output.flush()?;
-    progress(DecodeProgress { compressed_bytes: data.len() as u64, decoded_bytes: decoded_total });
-    Ok(Report {
-        source_len: data.len() as u64,
-        decoded_len: decoded_total,
-        members,
-        blocks,
-        speculative_chunks: speculative_total,
-        fallback_chunks: fallback_total,
-    })
+            let SegmentCommitter { decoded, crc, .. } = committer;
+            Ok((next_start as u64, decoded, crc.finalize(), speculative_chunks, fallback_chunks))
+        },
+    )?;
+    Ok(DeflateReport { source_len: (end_byte - start_byte) as u64, compressed_end_bit, decoded_len, crc, blocks, speculative_chunks, fallback_chunks })
 }
 
 fn parse_header(data: &[u8], start: usize) -> Result<Header> {
@@ -1008,11 +987,17 @@ impl Huffman {
         if self.max_bits == 0 {
             return Err(invalid_bit(bits.position_bits(), "attempted to decode an empty Huffman table"));
         }
-        let packed = self.table[bits.peek(self.max_bits)? as usize];
+        let remaining = bits.data.len().saturating_mul(8).saturating_sub(bits.bit);
+        let peek_bits = usize::from(self.max_bits).min(remaining) as u8;
+        let packed = self.table[bits.peek(peek_bits)? as usize];
         if packed == u16::MAX {
             return Err(invalid_bit(bits.position_bits(), "invalid Huffman code"));
         }
-        bits.drop((packed >> 9) as u8);
+        let length = (packed >> 9) as u8;
+        if usize::from(length) > remaining {
+            return Err(invalid_bit(bits.position_bits(), "truncated Huffman code"));
+        }
+        bits.drop(length);
         Ok(packed & 0x01ff)
     }
 }
@@ -1042,10 +1027,6 @@ impl<'a> Bits<'a> {
     #[inline(always)]
     fn position_bits(&self) -> usize {
         self.bit
-    }
-
-    fn byte_position(&self) -> usize {
-        self.bit.div_ceil(8)
     }
 
     #[inline(always)]
@@ -1238,7 +1219,10 @@ fn invalid_bit(bit: usize, message: impl Into<String>) -> Error {
 mod tests {
     use std::io::Write as _;
 
-    use flate2::{Compression, GzBuilder, write::GzEncoder};
+    use flate2::{
+        Compression, GzBuilder,
+        write::{DeflateEncoder, GzEncoder},
+    };
 
     use super::*;
 
@@ -1250,6 +1234,37 @@ mod tests {
         let mut encoder = GzEncoder::new(Vec::new(), level);
         encoder.write_all(data).unwrap();
         encoder.finish().unwrap()
+    }
+
+    fn compress_raw(data: &[u8]) -> Vec<u8> {
+        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::new(6));
+        encoder.write_all(data).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    #[test]
+    fn raw_deflate_reuses_serial_and_parallel_decoder() {
+        let plain = patterned(20 * 1024 * 1024);
+        let compressed = compress_raw(&plain);
+        for threads in [1, 4] {
+            let mut output = Vec::new();
+            let mut sink = WriterSink::new(&mut output);
+            let report =
+                decompress_deflate_to_sink_with_options_and_progress(&compressed, &mut sink, DecodeOptions { threads, ..DecodeOptions::default() }, |_| {})
+                    .unwrap();
+            assert_eq!(output, plain);
+            assert_eq!(report.decoded_len, plain.len() as u64);
+            assert_eq!(report.crc, crc32(&plain));
+        }
+        for size in 0..256 {
+            let plain = patterned(size);
+            let compressed = compress_raw(&plain);
+            let mut output = Vec::new();
+            let mut sink = WriterSink::new(&mut output);
+            decompress_deflate_to_sink_with_options_and_progress(&compressed, &mut sink, DecodeOptions { threads: 1, ..DecodeOptions::default() }, |_| {})
+                .unwrap();
+            assert_eq!(output, plain);
+        }
     }
 
     #[test]

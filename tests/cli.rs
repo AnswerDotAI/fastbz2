@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::Write,
+    io::{Cursor, Write},
     path::Path,
     process::{Command, Stdio},
     time::{Duration, UNIX_EPOCH},
@@ -8,6 +8,11 @@ use std::{
 
 use crabz2::{Level, compress};
 use flate2::{Compression, write::GzEncoder};
+use zip::{CompressionMethod as ZipCompression, ZipArchive, ZipWriter, write::FullFileOptions};
+
+#[allow(dead_code)]
+mod support;
+use support::{ZipMethod, zip_bytes, zip_with_modes};
 
 fn binary() -> Command {
     Command::new(env!("CARGO_BIN_EXE_fastbz2"))
@@ -25,6 +30,26 @@ fn gzip_bytes(plain: &[u8]) -> Vec<u8> {
 
 fn write_gzip(path: &Path, plain: &[u8]) {
     fs::write(path, gzip_bytes(plain)).unwrap();
+}
+
+fn linked_zip() -> Vec<u8> {
+    zip_with_modes(&[
+        ("nested/", b"", ZipMethod::Stored, 0o040750),
+        ("nested/root.txt", b"linked contents", ZipMethod::Deflate, 0o100640),
+        ("nested/symbolic.txt", b"root.txt", ZipMethod::Deflate, 0o120777),
+    ])
+}
+
+fn streaming_zip64() -> Vec<u8> {
+    let mut archive = ZipWriter::new_stream(Vec::new());
+    let modified = 1_700_000_123_u32;
+    let mut timestamp = vec![1];
+    timestamp.extend_from_slice(&modified.to_le_bytes());
+    let mut options = FullFileOptions::default().compression_method(ZipCompression::STORE).large_file(true).unix_permissions(0o600);
+    options.add_extra_data(0x5455, timestamp, true).unwrap();
+    archive.start_file("zip64.txt", options).unwrap();
+    archive.write_all(b"small payload with ZIP64 fields and a data descriptor").unwrap();
+    archive.finish().unwrap().into_inner()
 }
 fn tar_bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
     let mut archive = Vec::new();
@@ -465,4 +490,123 @@ fn tar_staging_preserves_symbolic_and_hard_links() {
     assert_eq!(root_metadata.ino(), fs::metadata(output.join("hard.txt")).unwrap().ino());
     assert_eq!(root_metadata.permissions().mode() & 0o777, 0o640);
     assert_eq!(root_metadata.modified().unwrap().duration_since(UNIX_EPOCH).unwrap().as_secs(), 1_700_000_123);
+}
+
+#[test]
+#[cfg(unix)]
+fn zip_auto_extracts_validates_lists_and_preserves_links() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("mixed.zip");
+    let output = directory.path().join("output");
+    fs::write(&input, linked_zip()).unwrap();
+
+    let tested = binary().args(["--test", input.to_str().unwrap()]).output().unwrap();
+    assert!(tested.status.success(), "{}", String::from_utf8_lossy(&tested.stderr));
+
+    let listed = binary().args(["--list", "--json", input.to_str().unwrap()]).output().unwrap();
+    assert!(listed.status.success(), "{}", String::from_utf8_lossy(&listed.stderr));
+    let listing: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(listing["format"], "zip");
+    assert_eq!(listing["entries"].as_array().unwrap().len(), 3);
+
+    let extracted = binary().args(["-C", output.to_str().unwrap(), input.to_str().unwrap()]).output().unwrap();
+    assert!(extracted.status.success(), "{}", String::from_utf8_lossy(&extracted.stderr));
+    assert_eq!(fs::read(output.join("nested/root.txt")).unwrap(), b"linked contents");
+    assert_eq!(fs::read_link(output.join("nested/symbolic.txt")).unwrap(), Path::new("root.txt"));
+    assert_eq!(fs::metadata(output.join("nested/root.txt")).unwrap().permissions().mode() & 0o777, 0o640);
+    assert_eq!(fs::metadata(output.join("nested")).unwrap().permissions().mode() & 0o777, 0o750);
+
+    let raw = binary().args([input.to_str().unwrap(), "-o", directory.path().join("raw").to_str().unwrap()]).output().unwrap();
+    assert_eq!(raw.status.code(), Some(2));
+}
+
+#[test]
+fn zip_stored_deflate_limits_corruption_and_paths_are_atomic() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("data.zip");
+    let plain = b"parallel deflate entry".repeat(10_000);
+    let stored = b"stored bytes".repeat(1_000);
+    let archive = zip_bytes(&[("deflated.txt", &plain, ZipMethod::Deflate), ("stored.bin", &stored, ZipMethod::Stored)]);
+    fs::write(&input, &archive).unwrap();
+
+    let limited = directory.path().join("limited");
+    let result = binary()
+        .args(["--max-output", &(plain.len() + stored.len() - 1).to_string(), "-C", limited.to_str().unwrap(), input.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(result.status.code(), Some(3));
+    assert_eq!(fs::read_dir(&limited).unwrap().count(), 0);
+
+    let mut corrupt = archive.clone();
+    let data_byte = {
+        let mut parsed = ZipArchive::new(Cursor::new(corrupt.as_slice())).unwrap();
+        let entry = parsed.by_index_raw(0).unwrap();
+        entry.data_start().unwrap() as usize + entry.compressed_size() as usize / 2
+    };
+    corrupt[data_byte] ^= 0x40;
+    fs::write(&input, corrupt).unwrap();
+    let output = directory.path().join("corrupt-output");
+    let result = binary().args(["-C", output.to_str().unwrap(), input.to_str().unwrap()]).output().unwrap();
+    assert_eq!(result.status.code(), Some(3));
+    assert_eq!(fs::read_dir(&output).unwrap().count(), 0);
+
+    let mut traversal = zip_bytes(&[("aa/x.txt", b"outside", ZipMethod::Deflate)]);
+    for offset in 0..=traversal.len() - b"aa/x.txt".len() {
+        if &traversal[offset..offset + b"aa/x.txt".len()] == b"aa/x.txt" {
+            traversal[offset..offset + b"../x.txt".len()].copy_from_slice(b"../x.txt");
+        }
+    }
+    fs::write(&input, traversal).unwrap();
+    let traversal_output = directory.path().join("traversal-output");
+    let result = binary().args(["-C", traversal_output.to_str().unwrap(), input.to_str().unwrap()]).output().unwrap();
+    assert_eq!(result.status.code(), Some(3));
+    assert_eq!(fs::read_dir(&traversal_output).unwrap().count(), 0);
+    assert!(!directory.path().join("x.txt").exists());
+}
+
+#[test]
+fn zip64_and_streaming_data_descriptors_use_the_same_extractor() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("streaming.zip");
+    let output = directory.path().join("output");
+    fs::write(&input, streaming_zip64()).unwrap();
+    let result = binary().args(["-C", output.to_str().unwrap(), input.to_str().unwrap()]).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    let extracted = output.join("zip64.txt");
+    assert_eq!(fs::read(&extracted).unwrap(), b"small payload with ZIP64 fields and a data descriptor");
+    assert_eq!(fs::metadata(extracted).unwrap().modified().unwrap().duration_since(UNIX_EPOCH).unwrap().as_secs(), 1_700_000_123);
+}
+
+#[test]
+fn zip_rejects_encryption_unsupported_methods_and_duplicate_paths() {
+    fn header(archive: &[u8], signature: &[u8; 4]) -> usize {
+        archive.windows(signature.len()).position(|bytes| bytes == signature).unwrap()
+    }
+    fn rejected(directory: &Path, name: &str, archive: &[u8], expected: &str) {
+        let input = directory.join(name);
+        fs::write(&input, archive).unwrap();
+        let result = binary().args(["--test", input.to_str().unwrap()]).output().unwrap();
+        assert_eq!(result.status.code(), Some(3), "{name}: {}", String::from_utf8_lossy(&result.stderr));
+        assert!(String::from_utf8_lossy(&result.stderr).contains(expected), "{}", String::from_utf8_lossy(&result.stderr));
+    }
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut encrypted = zip_bytes(&[("secret.txt", b"not actually encrypted", ZipMethod::Stored)]);
+    let local = header(&encrypted, b"PK\x03\x04");
+    let central = header(&encrypted, b"PK\x01\x02");
+    encrypted[local + 6] |= 1;
+    encrypted[central + 8] |= 1;
+    rejected(directory.path(), "encrypted.zip", &encrypted, "encrypted entry");
+
+    let mut unsupported = zip_bytes(&[("modern.txt", b"unsupported codec", ZipMethod::Stored)]);
+    let local = header(&unsupported, b"PK\x03\x04");
+    let central = header(&unsupported, b"PK\x01\x02");
+    unsupported[local + 8..local + 10].copy_from_slice(&93_u16.to_le_bytes());
+    unsupported[central + 10..central + 12].copy_from_slice(&93_u16.to_le_bytes());
+    rejected(directory.path(), "unsupported.zip", &unsupported, "unsupported compression method 93");
+
+    let duplicate = zip_bytes(&[("same.txt", b"first", ZipMethod::Deflate), ("same.txt", b"second", ZipMethod::Deflate)]);
+    rejected(directory.path(), "duplicate.zip", &duplicate, "central directory contains duplicate entry names");
 }

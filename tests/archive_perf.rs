@@ -6,8 +6,12 @@ use std::{
 };
 
 use crabz2::{Level, compress};
-use fastbz2::{DecodeOptions, OutputSink, decompress, gzip as gzip_decoder};
+use fastbz2::{DecodeOptions, OutputSink, gzip as gzip_decoder};
 use flate2::{Compression, write::GzEncoder};
+
+#[allow(dead_code)]
+mod support;
+use support::simplewiki_prefix;
 
 fn requested_threads() -> usize {
     std::env::var("FASTBZ2_THREADS").ok().map(|value| value.parse().expect("FASTBZ2_THREADS must be an integer")).unwrap_or(0)
@@ -17,14 +21,6 @@ fn binary() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_fastbz2"));
     command.args(["-P", &requested_threads().to_string()]);
     command
-}
-
-fn simplewiki_prefix() -> Vec<u8> {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("meta/simplewiki-first-5pct.xml.bz2");
-    let encoded = fs::read(&path).unwrap_or_else(|error| panic!("could not read {}: {error}", path.display()));
-    let contents = decompress(&encoded, DecodeOptions::default()).unwrap();
-    assert_eq!(contents.len(), 84_423_012);
-    contents
 }
 
 fn tar_bytes(contents: &[u8]) -> Vec<u8> {
