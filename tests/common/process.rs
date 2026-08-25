@@ -58,7 +58,9 @@ fn physical_footprint(pid: libc::pid_t) -> Option<u64> {
     // SAFETY: flavor 4 requests the exact repr(C) buffer above, which remains
     // writable for the call; `pid` is the benchmark process's own child.
     let result = unsafe { proc_pid_rusage(pid, 4, (&mut usage as *mut RusageInfoV4).cast()) };
-    (result == 0).then_some(usage.values[28])
+    // `values` starts immediately after `ri_uuid`; in rusage_info_v4,
+    // ri_phys_footprint is the eighth u64 field.
+    (result == 0).then_some(usage.values[7])
 }
 
 #[derive(Clone, Copy, Debug)]

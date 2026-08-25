@@ -5,6 +5,7 @@ mod block;
 mod crc;
 mod decode;
 mod decoder;
+pub mod deflate;
 mod error;
 mod format;
 pub mod gzip;

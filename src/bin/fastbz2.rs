@@ -1,5 +1,9 @@
+#[path = "fastbz2/archive_extract.rs"]
+mod archive_extract;
 #[path = "fastbz2/tar_extract.rs"]
 mod tar_extract;
+#[path = "fastbz2/zip_extract.rs"]
+mod zip_extract;
 
 use std::{
     fs,
@@ -20,18 +24,19 @@ use tempfile::NamedTempFile;
 #[derive(Parser)]
 #[command(
     version,
-    about = "Parallel bzip2/gzip decompression and streaming tar extraction",
-    long_about = "Parallel bzip2 and gzip decompression with streaming tar extraction. Decoding is the default operation. Recognised codec suffixes are removed from normal output names. Compressed tar suffixes extract automatically unless -o is given.",
+    about = "Parallel bzip2/gzip/ZIP decompression and safe archive extraction",
+    long_about = "Parallel bzip2 and gzip decompression, streaming tar extraction, and adaptive parallel ZIP extraction. Decoding is the default operation. Recognised codec suffixes are removed from normal output names. ZIP and compressed tar archives extract automatically unless -o is given; -o is not valid for ZIP.",
     after_help = r#"Examples:
   fastbz2 dump.xml.bz2              Write dump.xml
   fastbz2 events.json.gz -o -       Write decoded bytes to stdout
   fastbz2 backup.tgz -C restored    Extract into restored/
+  fastbz2 dataset.zip -C restored   Extract ZIP entries in parallel
   fastbz2 --test archive.tar.bz2    Validate without writing output
   fastbz2 --list --json data.gz     Show the validated layout as JSON"#,
     group(ArgGroup::new("mode").args(["test", "index", "list", "extract"]))
 )]
 struct Cli {
-    /// Input files, or - for stdin except with --index.
+    /// Input files, or - for stdin except with --index or --list.
     #[arg(required = true, num_args = 1..)]
     inputs: Vec<String>,
     /// Fully decode and validate checksums without writing output.
@@ -40,10 +45,10 @@ struct Cli {
     /// Build validated, source-bound .fbz2i indexes for bzip2 inputs.
     #[arg(long)]
     index: bool,
-    /// Validate and show bzip2 streams/blocks or gzip members/blocks.
+    /// Validate and show bzip2 streams/blocks, gzip members/blocks, or ZIP entries.
     #[arg(long)]
     list: bool,
-    /// Extract a decoded tar stream; automatic for recognised compressed-tar suffixes.
+    /// Extract a tar or ZIP archive; automatic for recognised archive suffixes.
     #[arg(short = 'x', long)]
     extract: bool,
     /// Write decoded bytes to PATH, or - for stdout; requires one input and disables automatic extraction.
@@ -82,6 +87,7 @@ struct Cli {
 enum Format {
     Bzip2,
     Gzip,
+    Zip,
 }
 
 fn main() -> ExitCode {
@@ -99,7 +105,7 @@ fn run(cli: Cli) -> fastbz2::Result<()> {
     let options = DecodeOptions { threads: cli.threads, memory_limit: cli.memory_limit };
     if cli.test {
         for input in &cli.inputs {
-            decode_input(input, &mut io::sink(), options, cli.max_output, cli.quiet)?;
+            test_input(input, options, cli.max_output, cli.quiet)?;
         }
         return Ok(());
     }
@@ -116,6 +122,9 @@ fn validate_cli(cli: &Cli) -> fastbz2::Result<()> {
     if cli.output.is_some() && cli.inputs.len() != 1 {
         return Err(invalid("--output requires exactly one input"));
     }
+    if cli.output.is_some() && cli.inputs.iter().any(|input| is_zip_archive(input)) {
+        return Err(invalid("--output is not supported for ZIP archives"));
+    }
     if cli.inputs.iter().any(|input| input == "-") && cli.inputs.len() != 1 {
         return Err(invalid("stdin must be the only input"));
     }
@@ -129,7 +138,7 @@ fn validate_cli(cli: &Cli) -> fastbz2::Result<()> {
 }
 
 fn should_extract(cli: &Cli, input: &str) -> bool {
-    cli.extract || (cli.output.is_none() && is_tar_archive(input))
+    cli.extract || (cli.output.is_none() && is_archive(input))
 }
 
 fn run_decode(cli: &Cli, options: DecodeOptions) -> fastbz2::Result<()> {
@@ -214,6 +223,15 @@ fn run_list(cli: &Cli, options: DecodeOptions) -> fastbz2::Result<()> {
                     print_gzip_report((cli.inputs.len() > 1).then_some(input), &report);
                 }
             }
+            Format::Zip => {
+                let mut display = ProgressDisplay::new(input, source.as_slice().len() as u64, cli.quiet);
+                let report = zip_extract::validate(source.as_slice(), options, cli.max_output, |progress| display.update(progress))?;
+                if cli.json {
+                    values.push(zip_json(input, &report));
+                } else {
+                    print_zip_report((cli.inputs.len() > 1).then_some(input), &report);
+                }
+            }
         }
     }
     if cli.json {
@@ -244,7 +262,31 @@ fn extract_data(
     max_output: Option<usize>,
     quiet: bool,
 ) -> fastbz2::Result<()> {
-    tar_extract::unpack(destination, overwrite, |writer| decode_data_to_sink(data, label, writer, options, max_output, quiet))
+    if select_format(label, data)? == Format::Zip {
+        let mut display = ProgressDisplay::new(label, data.len() as u64, quiet);
+        zip_extract::unpack(data, destination, overwrite, options, max_output, |progress| display.update(progress)).map(|_| ())
+    } else {
+        tar_extract::unpack(destination, overwrite, |writer| decode_data_to_sink(data, label, writer, options, max_output, quiet))
+    }
+}
+
+fn test_input(input: &str, options: DecodeOptions, max_output: Option<usize>, quiet: bool) -> fastbz2::Result<()> {
+    if input == "-" {
+        let mut data = Vec::new();
+        io::stdin().lock().read_to_end(&mut data)?;
+        return test_data(&data, "stdin", options, max_output, quiet);
+    }
+    let source = Source::open(input)?;
+    test_data(source.as_slice(), input, options, max_output, quiet)
+}
+
+fn test_data(data: &[u8], label: &str, options: DecodeOptions, max_output: Option<usize>, quiet: bool) -> fastbz2::Result<()> {
+    if select_format(label, data)? == Format::Zip {
+        let mut display = ProgressDisplay::new(label, data.len() as u64, quiet);
+        zip_extract::validate(data, options, max_output, |progress| display.update(progress)).map(|_| ())
+    } else {
+        decode_data(data, label, &mut io::sink(), options, max_output, quiet)
+    }
 }
 
 fn decode_input(input: &str, output: &mut impl Write, options: DecodeOptions, max_output: Option<usize>, quiet: bool) -> fastbz2::Result<()> {
@@ -276,6 +318,7 @@ fn decode_data_to_sink(
     match select_format(label, data)? {
         Format::Bzip2 => decompress_to_sink_with_progress(data, &mut output, options, |progress| display.update(progress)),
         Format::Gzip => gzip::decompress_to_sink_with_options_and_progress(data, &mut output, options, |progress| display.update(progress)).map(|_| ()),
+        Format::Zip => Err(invalid("ZIP archives extract to a directory and cannot be decoded to one output stream")),
     }
 }
 
@@ -455,6 +498,7 @@ fn format_extension(input: &Path) -> Option<(Format, &'static str)> {
         "tbz" | "tbz2" => Some((Format::Bzip2, "tar")),
         "gz" | "gzip" => Some((Format::Gzip, "")),
         "tgz" => Some((Format::Gzip, "tar")),
+        "zip" => Some((Format::Zip, "")),
         _ => None,
     }
 }
@@ -462,6 +506,14 @@ fn format_extension(input: &Path) -> Option<(Format, &'static str)> {
 fn is_tar_archive(input: &str) -> bool {
     let input = input.to_ascii_lowercase();
     [".tar.bz2", ".tar.bzip2", ".tbz", ".tbz2", ".tar.gz", ".tar.gzip", ".tgz"].iter().any(|extension| input.ends_with(extension))
+}
+
+fn is_zip_archive(input: &str) -> bool {
+    input.to_ascii_lowercase().ends_with(".zip")
+}
+
+fn is_archive(input: &str) -> bool {
+    is_tar_archive(input) || is_zip_archive(input)
 }
 
 fn default_output(input: &Path) -> PathBuf {
@@ -476,8 +528,10 @@ fn select_format(input: &str, data: &[u8]) -> fastbz2::Result<Format> {
         Ok(Format::Bzip2)
     } else if data.starts_with(&[0x1f, 0x8b]) {
         Ok(Format::Gzip)
+    } else if data.starts_with(b"PK\x03\x04") || data.starts_with(b"PK\x05\x06") || data.starts_with(b"PK\x07\x08") {
+        Ok(Format::Zip)
     } else {
-        Err(invalid(format!("cannot determine compression format for {input}; expected a bzip2/gzip extension or magic")))
+        Err(invalid(format!("cannot determine compression format for {input}; expected a bzip2, gzip, or ZIP extension or magic")))
     }
 }
 
@@ -516,6 +570,26 @@ fn print_gzip_report(input: Option<&String>, report: &gzip::Report) {
             member.decoded_len,
             member.mtime,
             member.operating_system
+        );
+    }
+}
+
+fn print_zip_report(input: Option<&String>, report: &zip_extract::Report) {
+    if let Some(input) = input {
+        println!("input\t{input}");
+    }
+    println!("format\tzip");
+    println!("compressed_bytes\t{}", report.source_len);
+    println!("decoded_bytes\t{}", report.decoded_len);
+    println!("entries\t{}", report.entries.len());
+    for (number, entry) in report.entries.iter().enumerate() {
+        println!(
+            "entry\t{number}\tmethod={}\tcompressed={}\tdecoded={}\tcrc={:08x}\tpath={}",
+            entry.compression_method,
+            entry.compressed_size,
+            entry.decoded_size,
+            entry.crc,
+            entry.path.display(),
         );
     }
 }
@@ -589,6 +663,23 @@ fn gzip_json(input: &str, report: &gzip::Report) -> Value {
     })
 }
 
+fn zip_json(input: &str, report: &zip_extract::Report) -> Value {
+    json!({
+        "input": input,
+        "format": "zip",
+        "source_bytes": report.source_len,
+        "decoded_bytes": report.decoded_len,
+        "entries": report.entries.iter().enumerate().map(|(number, entry)| json!({
+            "number": number,
+            "path": entry.path,
+            "compression_method": entry.compression_method,
+            "compressed_bytes": entry.compressed_size,
+            "decoded_bytes": entry.decoded_size,
+            "expected_crc": entry.crc,
+        })).collect::<Vec<_>>(),
+    })
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
@@ -638,7 +729,7 @@ fn exit_status(error: &Error) -> u8 {
         Error::Io(source) if source.kind() == io::ErrorKind::InvalidData => 3,
         Error::Io(_) => 1,
         Error::InvalidConfiguration(_) => 2,
-        Error::InvalidStreamHeader | Error::InvalidGzip(_) | Error::Decode { .. } | Error::InvalidIndex(_) => 3,
+        Error::InvalidStreamHeader | Error::InvalidGzip(_) | Error::InvalidZip(_) | Error::Decode { .. } | Error::InvalidIndex(_) => 3,
         _ => 4,
     }
 }
