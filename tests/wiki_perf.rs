@@ -167,6 +167,20 @@ fn rapidgzip_rust_process_metrics() {
 
 #[test]
 #[cfg(unix)]
+#[ignore = "local single-run fastbz2 full gzip validation"]
+fn gzip_fastbz2_validation() {
+    let path = corpus_path("simplewiki-full.xml.gz");
+    let warm_path = corpus_path("simplewiki-first-5pct.xml.gz");
+    let threads = requested_threads();
+    let binary = env!("CARGO_BIN_EXE_fastbz2");
+    warm_validation(binary, &warm_path, threads);
+    let result = timed_validation(binary, &path, threads);
+    assert!(result.status.success());
+    eprintln!("fastbz2 full gzip: {:.3}s", result.wall.as_secs_f64());
+}
+
+#[test]
+#[cfg(unix)]
 #[ignore = "local single-run gzip performance ratio against rapidgzip-rust"]
 fn gzip_reference_ratio() {
     let path = corpus_path("simplewiki-full.xml.gz");

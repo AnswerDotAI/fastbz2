@@ -4,7 +4,10 @@ use rayon::{ThreadPool, ThreadPoolBuilder};
 
 use crate::format::scan_with_pool;
 use crate::pipeline::{Job, OrderedResults, PipelineLimits, run_ordered};
-use crate::{BlockCandidate, BlockIndex, DecodeError, EndCandidate, Error, Index, MAX_DECODED_BLOCK, Result, StreamIndex, combine_stream_crc, decoder};
+use crate::{
+    BlockCandidate, BlockIndex, DecodeError, EndCandidate, Error, Index, MAX_DECODED_BLOCK, OutputSink, Result, StreamIndex, WriterSink, combine_stream_crc,
+    decoder,
+};
 
 pub const DEFAULT_MEMORY_LIMIT: usize = 1024 * 1024 * 1024;
 
@@ -57,12 +60,6 @@ impl Marker {
 }
 
 pub fn decompress(data: &[u8], options: DecodeOptions) -> Result<Vec<u8>> {
-    let options = options.validate()?;
-    if options.resolved_threads() == 1 {
-        let mut output = Vec::new();
-        decoder::decode_serial(data, &mut output)?;
-        return Ok(output);
-    }
     let mut output = Vec::new();
     decompress_to_writer(data, &mut output, options)?;
     Ok(output)
@@ -74,9 +71,16 @@ pub fn decompress_to_writer(data: &[u8], output: &mut impl Write, options: Decod
     decompress_to_writer_with_progress(data, output, options, |_| {})
 }
 
-pub fn decompress_to_writer_with_progress(
+pub fn decompress_to_writer_with_progress(data: &[u8], output: &mut impl Write, options: DecodeOptions, progress: impl FnMut(DecodeProgress)) -> Result<()> {
+    let mut output = WriterSink::new(output);
+    decompress_to_sink_with_progress(data, &mut output, options, progress)
+}
+
+/// Decode into an output that can take ownership of completed chunks.
+#[doc(hidden)]
+pub fn decompress_to_sink_with_progress(
     data: &[u8],
-    output: &mut impl Write,
+    output: &mut impl OutputSink,
     options: DecodeOptions,
     mut progress: impl FnMut(DecodeProgress),
 ) -> Result<()> {
@@ -86,7 +90,7 @@ pub fn decompress_to_writer_with_progress(
             progress(DecodeProgress { compressed_bytes, decoded_bytes });
         });
     }
-    decode_to_writer_impl(data, output, options, &mut progress).map(|_| ())
+    decode_to_sink_impl(data, output, options, &mut progress).map(|_| ())
 }
 
 pub fn build_index(data: &[u8], options: DecodeOptions) -> Result<Index> {
@@ -94,20 +98,23 @@ pub fn build_index(data: &[u8], options: DecodeOptions) -> Result<Index> {
 }
 
 pub fn build_index_with_progress(data: &[u8], options: DecodeOptions, mut progress: impl FnMut(DecodeProgress)) -> Result<Index> {
-    decode_to_writer_impl(data, &mut std::io::sink(), options, &mut progress)
+    let mut output = WriterSink::new(std::io::sink());
+    decode_to_sink_impl(data, &mut output, options, &mut progress)
 }
 
 /// Decode a complete bzip2 input, validate every CRC, and build its block index.
 pub fn decode_to_writer(data: &[u8], output: &mut impl Write, options: DecodeOptions) -> Result<Index> {
-    decode_to_writer_impl(data, output, options, &mut |_| {})
+    let mut output = WriterSink::new(output);
+    decode_to_sink_impl(data, &mut output, options, &mut |_| {})
 }
 
 /// Decode a complete bzip2 input, return its index, and report completed work.
 pub fn decode_to_writer_with_progress(data: &[u8], output: &mut impl Write, options: DecodeOptions, mut progress: impl FnMut(DecodeProgress)) -> Result<Index> {
-    decode_to_writer_impl(data, output, options, &mut progress)
+    let mut output = WriterSink::new(output);
+    decode_to_sink_impl(data, &mut output, options, &mut progress)
 }
 
-fn decode_to_writer_impl(data: &[u8], output: &mut impl Write, options: DecodeOptions, progress: &mut impl FnMut(DecodeProgress)) -> Result<Index> {
+fn decode_to_sink_impl(data: &[u8], output: &mut impl OutputSink, options: DecodeOptions, progress: &mut impl FnMut(DecodeProgress)) -> Result<Index> {
     let options = options.validate()?;
     let threads = options.resolved_threads();
     let pool = thread_pool(threads)?;
@@ -152,7 +159,7 @@ fn decode_to_writer_impl(data: &[u8], output: &mut impl Write, options: DecodeOp
 
 fn assemble(
     data: &[u8],
-    output: &mut impl Write,
+    output: &mut impl OutputSink,
     markers: &[Marker],
     candidates: &mut impl Candidates,
     progress: &mut impl FnMut(DecodeProgress),
@@ -197,8 +204,8 @@ fn assemble(
                     }
                     let end_index = marker_at(markers, decoded.end_bit)?;
                     candidates.discard_before(end_index);
-                    output.write_all(&decoded.output)?;
                     let decoded_len = decoded.output.len() as u64;
+                    output.write_owned_from(decoded.output, 0)?;
                     blocks.push(BlockIndex {
                         compressed_start_bit: block.bit_offset,
                         compressed_end_bit: markers[end_index].bit_offset(),

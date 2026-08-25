@@ -12,11 +12,13 @@ src/decode.rs         serial/parallel decode scheduling and index construction
 src/decoder.rs        bzip2 block machinery and 12-bit Huffman fast tables
 src/format.rs         cheap structural scan for header and marker candidates
 src/gzip.rs           gzip framing, LSB-first DEFLATE, CRC32, and block reports
+src/output.rs         owned/borrowed decoded-output sink abstraction
 src/pipeline.rs       shared ordered, byte-budgeted, staged worker scheduler
 src/index.rs           stable persistent index format
 src/indexed.rs         seekable decoded view and block cache
 src/lib.rs            public Rust API and private PyO3 binding
 src/source.rs         owned and memory-mapped compressed sources
+src/bin/fastbz2/tar_extract.rs  bounded decode-to-tar bridge, staging, and commit
 python/fastbz2/       thin Python I/O wrapper over fastbz2._core
 build_backend.py      stage the native CLI for PEP 517 wheel builds
 tests/corpus/         selected upstream conformance and corruption fixtures
@@ -26,11 +28,13 @@ tools/stage_binaries.py copy the release executable into Maturin wheel data
 
 The current bzip2 scanner deliberately does not treat 48-bit marker matches or later `BZh` headers as validated structure. Full decoding must establish the exact block chain and validate every block CRC plus the combined stream CRC before marker candidates can become trusted index entries. Python integration tests use standard-library `bz2`/libbz2 as an independent fixture generator.
 
-The gzip decoder is an in-repo RFC 1952/RFC 1951 implementation rather than a wrapper around a production codec. It parses optional headers and concatenated members, decodes stored/fixed/dynamic blocks, maintains the 32 KiB LZ77 history, and validates FHCRC, CRC32, and ISIZE. For large inputs, independently discovered dynamic-block boundaries seed unknown history with compact markers. A marker-free history switches the same decoder to byte output; otherwise the coordinator resolves only the suffix needed by the successor and queues full resolution plus CRC on the shared staged scheduler. Reports retain member boundaries, DEFLATE block ranges, and accepted/fallback chunk counts. `crc32fast` is the sole production helper; `flate2` is dev-only.
+The gzip decoder is an in-repo RFC 1952/RFC 1951 implementation rather than a wrapper around a production codec. It parses optional headers and concatenated members, decodes stored/fixed/dynamic blocks, maintains the 32 KiB LZ77 history, and validates FHCRC, CRC32, and ISIZE. For large inputs, independently discovered dynamic-block boundaries seed unknown history with compact markers. Primary jobs compute the CRC of each known clean suffix before ordered resolution. Resolution workers resolve the marker prefix, hash that prefix, and combine the two CRCs without rescanning the clean bytes. A marker-free history switches the same decoder to byte output. Reports retain member boundaries, DEFLATE block ranges, and accepted/fallback chunk counts. `crc32fast` is the sole production helper; `flate2` is dev-only.
 
 The decoder remains independent of files, threads, Python, and the CLI. Parallel scanning/decoding and indexed seeking are layered over it. Native workers never call Python. Large offsets use explicit 64-bit bit/byte types, and speculative block-marker hits are accepted only when they form an exact stream chain with valid block and combined stream CRCs.
 
-Both core decode APIs report completed compressed and decoded byte counts without knowing anything about terminals. The CLI selects bzip2 or gzip by a recognised extension and falls back to magic for stdin or unknown names. It layers delayed, rate-limited TTY progress rendering over the shared callbacks; redirected stderr and `--quiet` produce no progress output. Decoded files use same-directory temporary files and atomic persistence, then inherit the compressed input's modification time and permissions. `--rm` removes an input only after decode, persistence, and metadata copying all succeed. Output-size limits are enforced by a writer wrapper, so each decoder has one code path for files, stdout, validation, and listing.
+Both core decode APIs report completed compressed and decoded byte counts without knowing anything about terminals. The CLI selects bzip2 or gzip by a recognised extension and falls back to magic for stdin or unknown names. It layers delayed, rate-limited TTY progress rendering over the shared callbacks; redirected stderr and `--quiet` produce no progress output. Decoded files use same-directory temporary files and atomic persistence, then inherit the compressed input's modification time and permissions. `--rm` removes an input only after decode, persistence, and metadata copying all succeed. An `OutputSink` wrapper enforces output-size limits, so each decoder has one code path for files, stdout, validation, listing, and tar extraction.
+
+Tar format semantics use the mature `tar` crate, pinned from 0.4.46 and built without its optional xattr feature. It handles streaming GNU/PAX/long-name/link entries and confines extracted paths to the destination. A zero-capacity rendezvous channel transfers each owned decoder chunk and its live suffix offset to `tar::Archive`. The channel queues no chunks and applies backpressure. `tar::Archive` pulls data through `Read`, which copies once from the current chunk into its request buffer. Extraction writes immediately into a same-filesystem temporary directory, drains all trailing tar padding so codec validation completes, then preflights every destination conflict and moves entries into place with renames. Multiple inputs remain sequential so their per-codec worker pools cannot oversubscribe the global thread budget.
 
 The shared `pipeline.rs` scheduler provides ordered results, byte-budgeted admission, cancellation, and a staged priority queue. Bzip2 uses the rolling candidate path: workers reserve the maximum possible decoded block size, then shrink that reservation to actual retained output until ordered validation consumes or rejects it. Gzip uses the staged path: native workers alternate speculative DEFLATE decoding with higher-priority marker resolution, while the coordinator advances only the 32 KiB dependency windows and emits resolved chunks in order. Decode results and outstanding resolution results have separate bounded horizons, preventing either dependency stalls or unbounded memory.
 
@@ -53,9 +57,35 @@ Run `cargo fmt --check` after Rust edits and `chkstyle` after Python edits once 
 
 ## Correctness and performance acceptance
 
-The normal release test path decodes selected valid and corrupt cases from the maintained upstream `bzip2-testfiles` collection. Generated byte distributions add differential coverage. Valid bzip2 outputs are compared byte-for-byte with `libbz2-rs-sys`. Gzip tests cover stored, fixed-Huffman, and dynamic-Huffman blocks; optional headers and FHCRC; concatenated members; truncation; and trailer corruption across varied inputs and compression levels generated by `flate2`. Both oracles are dev-only and never part of production decoding.
+The normal release test path decodes selected valid and corrupt cases from the maintained upstream `bzip2-testfiles` collection. Generated byte distributions add differential coverage. Valid bzip2 outputs are compared byte-for-byte with `libbz2-rs-sys`. Gzip tests cover stored, fixed-Huffman, and dynamic-Huffman blocks; optional headers and FHCRC; concatenated members; truncation; and trailer corruption across varied inputs and compression levels generated by `flate2`. Both oracles are dev-only and never part of production decoding. CLI tests generate tar archives and cover gzip/bzip2 wrappers, compound-extension dispatch, long names, stdin, raw-tar output, output limits, overwrite preflight, late checksum failure, and traversal confinement.
 
 The normal release path contains warmed end-to-end performance regression gates capped at 1.3 times each oracle, allowing for noise on shared runners. The gzip gates independently exercise a highly compressible LZ77-heavy shape and an incompressible literal-heavy shape against `flate2`; the bzip2 gate uses `libbz2-rs-sys`. Representative local acceptance remains 1.2 times the corresponding oracle. The ignored full-wiki gzip test applies that threshold to rapidgzip-rust. Keep the whole release test suite below five seconds on the primary development laptop; individual timed workloads should normally be about 0.1 seconds or less.
+
+### Local archive extraction benchmarks
+
+`tests/archive_perf.rs` measures the tar layer on the real `meta/simplewiki-first-5pct.xml.bz2` corpus. Fixture decoding and gzip/bzip2 recompression finish before timing. Each ignored test warms one target and measures it once. Run only the implementation changed:
+
+```bash
+cargo test --release --test archive_perf tgz_fastbz2_overhead -- --ignored --exact --nocapture
+cargo test --release --test archive_perf tgz_system_reference -- --ignored --exact --nocapture
+cargo test --release --test archive_perf tbz2_fastbz2_overhead -- --ignored --exact --nocapture
+cargo test --release --test archive_perf tbz2_system_reference -- --ignored --exact --nocapture
+cargo test --release --test archive_perf tar_crate_reference -- --ignored --exact --nocapture
+FASTBZ2_THREADS=18 cargo test --release --test archive_perf tgz_output_cadence -- --ignored --exact --nocapture
+```
+
+These are single runs after owned-suffix transfer and the 512 KiB gzip grid change:
+
+| Format | Raw decode | fastbz2 extraction | Extraction/raw | System `tar` | Extraction/system |
+|---|---:|---:|---:|---:|---:|
+| `.tgz` | 39.919 ms | 56.850 ms | 1.424x | 117.962 ms | 0.482x |
+| `.tar.bz2` | 148.411 ms | 151.783 ms | 1.023x | 1.168 s | 0.130x |
+
+Direct extraction of the uncompressed in-memory tar through the `tar` crate took 32.069 ms. Raw gzip decode plus direct tar extraction totals 71.988 ms. The combined pipeline takes 56.850 ms and hides 15.138 ms, or 47%, of the direct tar work.
+
+The cadence benchmark identified ordered gzip output as the main overlap limit. With a 1 MiB speculative grid, output began at 8.491 ms, reached 25% at 29.595 ms, and completed at 33.724 ms. A 512 KiB grid began at 4.798 ms, reached 25% at 23.993 ms, and completed at 32.915 ms. A 256 KiB grid emitted earlier but slowed raw decode to 38.073 ms and extraction to 57.792 ms. The 512 KiB grid gave the best measured balance. Computing each clean suffix CRC in its primary job moved 25% output to 19.818 ms, 75% to 30.355 ms, and completion to 30.678 ms. The corresponding extraction run was effectively flat at 56.850 ms. Tar cannot process later bytes while an earlier ordered gzip segment remains incomplete. A custom tar parser would not remove that dependency. A one-chunk channel buffer regressed extraction to 59.698 ms, so the bridge retains its zero-capacity rendezvous.
+
+System `tar` remains the external reference and 1.2x remains the research target. Raw-tar output is a lower bound rather than an extractor reference. The fastbz2 tests use a broad 3x raw-decode regression guard. Keep the measurements single-run; change an implementation before rerunning it.
 
 Legacy randomized blocks produced by bzip2 versions before 0.9.5 are intentionally unsupported. Supporting that obsolete format would add complexity to the production decoder for data that is not realistically encountered today.
 
@@ -75,9 +105,10 @@ The full bzip2 confirmation streams to a counting sink and validates every block
 cargo test --release --test wiki_perf simplewiki_full -- --ignored --exact --nocapture
 ```
 
-The gzip acceptance test warms both executables with `meta/simplewiki-first-5pct.xml.gz`, performs exactly one measured full-dump validation with each, and fails above 1.2× the sibling rapidgzip-rust checkout:
+The fastbz2-only gzip test warms with `meta/simplewiki-first-5pct.xml.gz` and performs one full-dump validation. The ratio test warms both executables, measures each full dump once, and fails above 1.2x the sibling rapidgzip-rust checkout:
 
 ```bash
+cargo test --release --test wiki_perf gzip_fastbz2_validation -- --ignored --exact --nocapture
 cargo test --release --test wiki_perf gzip_reference_ratio -- --ignored --exact --nocapture
 ```
 

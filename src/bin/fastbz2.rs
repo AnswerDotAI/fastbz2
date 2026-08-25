@@ -1,3 +1,6 @@
+#[path = "fastbz2/tar_extract.rs"]
+mod tar_extract;
+
 use std::{
     fs,
     io::{self, IsTerminal, Read, Write},
@@ -8,7 +11,8 @@ use std::{
 
 use clap::{ArgGroup, Parser};
 use fastbz2::{
-    DecodeOptions, DecodeProgress, Error, Index, Source, build_index_with_progress, decode_to_writer_with_progress, decompress_to_writer_with_progress, gzip,
+    DecodeOptions, DecodeProgress, Error, Index, OutputSink, Source, WriterSink, build_index_with_progress, decode_to_writer_with_progress,
+    decompress_to_sink_with_progress, gzip,
 };
 use serde_json::{Value, json};
 use tempfile::NamedTempFile;
@@ -16,50 +20,60 @@ use tempfile::NamedTempFile;
 #[derive(Parser)]
 #[command(
     version,
-    about = "Fast compression-format research workbench",
-    group(ArgGroup::new("mode").args(["test", "index", "list"]))
+    about = "Parallel bzip2/gzip decompression and streaming tar extraction",
+    long_about = "Parallel bzip2 and gzip decompression with streaming tar extraction. Decoding is the default operation. Recognised codec suffixes are removed from normal output names. Compressed tar suffixes extract automatically unless -o is given.",
+    after_help = r#"Examples:
+  fastbz2 dump.xml.bz2              Write dump.xml
+  fastbz2 events.json.gz -o -       Write decoded bytes to stdout
+  fastbz2 backup.tgz -C restored    Extract into restored/
+  fastbz2 --test archive.tar.bz2    Validate without writing output
+  fastbz2 --list --json data.gz     Show the validated layout as JSON"#,
+    group(ArgGroup::new("mode").args(["test", "index", "list", "extract"]))
 )]
 struct Cli {
-    /// Input files, or - for stdin when decoding or testing.
+    /// Input files, or - for stdin except with --index.
     #[arg(required = true, num_args = 1..)]
     inputs: Vec<String>,
-    /// Fully decode and validate without writing plaintext.
+    /// Fully decode and validate checksums without writing output.
     #[arg(long)]
     test: bool,
-    /// Build validated, source-bound bzip2 block indexes.
+    /// Build validated, source-bound .fbz2i indexes for bzip2 inputs.
     #[arg(long)]
     index: bool,
-    /// Validate and show stream/block layouts.
+    /// Validate and show bzip2 streams/blocks or gzip members/blocks.
     #[arg(long)]
     list: bool,
-    /// Output path, or - for stdout; requires one input.
-    #[arg(short, long, conflicts_with_all = ["test", "list", "output_dir"])]
+    /// Extract a decoded tar stream; automatic for recognised compressed-tar suffixes.
+    #[arg(short = 'x', long)]
+    extract: bool,
+    /// Write decoded bytes to PATH, or - for stdout; requires one input and disables automatic extraction.
+    #[arg(short, long, conflicts_with_all = ["test", "list", "extract", "output_dir"])]
     output: Option<PathBuf>,
-    /// Put decoded files in DIRECTORY.
+    /// Put decoded files or extracted archive entries in DIRECTORY.
     #[arg(short = 'C', long = "output-dir", conflicts_with_all = ["test", "index", "list", "output"])]
     output_dir: Option<PathBuf>,
-    /// Bzip2 worker threads; 0 uses all available CPUs.
+    /// Decoder worker threads; 0 uses all available CPUs.
     #[arg(short = 'P', long, default_value_t = 0)]
     threads: usize,
-    /// Maximum speculative bzip2 output.
+    /// Maximum speculative decoder output; accepts binary size suffixes.
     #[arg(long, default_value = "1G", value_parser = parse_size)]
     memory_limit: usize,
-    /// Refuse to decode more than SIZE bytes per input.
+    /// Maximum decoded bytes per input; accepts binary size suffixes.
     #[arg(long, value_parser = parse_size)]
     max_output: Option<usize>,
-    /// Replace existing output files.
+    /// Replace existing output files or archive entries.
     #[arg(short, long, conflicts_with_all = ["test", "list", "skip_existing"])]
     force: bool,
-    /// Skip existing output files.
-    #[arg(long, conflicts_with_all = ["test", "list", "force"])]
+    /// Skip existing decoded output files.
+    #[arg(long, conflicts_with_all = ["test", "list", "extract", "force"])]
     skip_existing: bool,
-    /// Remove compressed inputs after successful extraction.
+    /// Remove compressed inputs after successful decoding or extraction.
     #[arg(long = "rm", conflicts_with_all = ["test", "index", "list"])]
     remove_input: bool,
     /// Suppress progress and skip notices.
     #[arg(short, long)]
     quiet: bool,
-    /// Emit list output as JSON.
+    /// Emit `--list` output as JSON.
     #[arg(long, requires = "list")]
     json: bool,
 }
@@ -108,7 +122,14 @@ fn validate_cli(cli: &Cli) -> fastbz2::Result<()> {
     if (cli.index || cli.list) && cli.inputs.iter().any(|input| input == "-") {
         return Err(invalid("stdin is supported only for decoding and --test"));
     }
+    if cli.skip_existing && cli.inputs.iter().any(|input| should_extract(cli, input)) {
+        return Err(invalid("--skip-existing is not supported when extracting archives"));
+    }
     Ok(())
+}
+
+fn should_extract(cli: &Cli, input: &str) -> bool {
+    cli.extract || (cli.output.is_none() && is_tar_archive(input))
 }
 
 fn run_decode(cli: &Cli, options: DecodeOptions) -> fastbz2::Result<()> {
@@ -116,6 +137,15 @@ fn run_decode(cli: &Cli, options: DecodeOptions) -> fastbz2::Result<()> {
         fs::create_dir_all(directory)?;
     }
     for input in &cli.inputs {
+        let extract = should_extract(cli, input);
+        if extract {
+            let destination = cli.output_dir.as_deref().unwrap_or_else(|| Path::new("."));
+            extract_input(input, destination, cli.force, options, cli.max_output, cli.quiet)?;
+            if cli.remove_input && input != "-" {
+                fs::remove_file(input)?;
+            }
+            continue;
+        }
         if input == "-" || cli.output.as_deref() == Some(Path::new("-")) {
             decode_input(input, &mut io::stdout().lock(), options, cli.max_output, cli.quiet)?;
             if cli.remove_input && input != "-" {
@@ -194,6 +224,29 @@ fn run_list(cli: &Cli, options: DecodeOptions) -> fastbz2::Result<()> {
     Ok(())
 }
 
+fn extract_input(input: &str, destination: &Path, overwrite: bool, options: DecodeOptions, max_output: Option<usize>, quiet: bool) -> fastbz2::Result<()> {
+    if input == "-" {
+        let mut data = Vec::new();
+        io::stdin().lock().read_to_end(&mut data)?;
+        extract_data(&data, "stdin", destination, overwrite, options, max_output, quiet)
+    } else {
+        let source = Source::open(input)?;
+        extract_data(source.as_slice(), input, destination, overwrite, options, max_output, quiet)
+    }
+}
+
+fn extract_data(
+    data: &[u8],
+    label: &str,
+    destination: &Path,
+    overwrite: bool,
+    options: DecodeOptions,
+    max_output: Option<usize>,
+    quiet: bool,
+) -> fastbz2::Result<()> {
+    tar_extract::unpack(destination, overwrite, |writer| decode_data_to_sink(data, label, writer, options, max_output, quiet))
+}
+
 fn decode_input(input: &str, output: &mut impl Write, options: DecodeOptions, max_output: Option<usize>, quiet: bool) -> fastbz2::Result<()> {
     if input == "-" {
         let mut data = Vec::new();
@@ -206,16 +259,28 @@ fn decode_input(input: &str, output: &mut impl Write, options: DecodeOptions, ma
 }
 
 fn decode_data(data: &[u8], label: &str, output: &mut impl Write, options: DecodeOptions, max_output: Option<usize>, quiet: bool) -> fastbz2::Result<()> {
-    let mut output = LimitedWriter::new(output, max_output);
+    let mut output = WriterSink::new(output);
+    decode_data_to_sink(data, label, &mut output, options, max_output, quiet)
+}
+
+fn decode_data_to_sink(
+    data: &[u8],
+    label: &str,
+    output: &mut impl OutputSink,
+    options: DecodeOptions,
+    max_output: Option<usize>,
+    quiet: bool,
+) -> fastbz2::Result<()> {
+    let mut output = LimitedOutput::new(output, max_output);
     let mut display = ProgressDisplay::new(label, data.len() as u64, quiet);
     match select_format(label, data)? {
-        Format::Bzip2 => decompress_to_writer_with_progress(data, &mut output, options, |progress| display.update(progress)),
-        Format::Gzip => gzip::decompress_to_writer_with_options_and_progress(data, &mut output, options, |progress| display.update(progress)).map(|_| ()),
+        Format::Bzip2 => decompress_to_sink_with_progress(data, &mut output, options, |progress| display.update(progress)),
+        Format::Gzip => gzip::decompress_to_sink_with_options_and_progress(data, &mut output, options, |progress| display.update(progress)).map(|_| ()),
     }
 }
 
 fn build_gzip_report_data(data: &[u8], label: &str, options: DecodeOptions, max_output: Option<usize>, quiet: bool) -> fastbz2::Result<gzip::Report> {
-    let mut sink = LimitedWriter::new(io::sink(), max_output);
+    let mut sink = LimitedOutput::new(io::sink(), max_output);
     let mut display = ProgressDisplay::new(label, data.len() as u64, quiet);
     gzip::decompress_to_writer_with_options_and_progress(data, &mut sink, options, |progress| display.update(progress))
 }
@@ -223,33 +288,58 @@ fn build_gzip_report_data(data: &[u8], label: &str, options: DecodeOptions, max_
 fn build_index_data(data: &[u8], label: &str, options: DecodeOptions, max_output: Option<usize>, quiet: bool) -> fastbz2::Result<Index> {
     let mut display = ProgressDisplay::new(label, data.len() as u64, quiet);
     if let Some(limit) = max_output {
-        let mut sink = LimitedWriter::new(io::sink(), Some(limit));
+        let mut sink = LimitedOutput::new(io::sink(), Some(limit));
         decode_to_writer_with_progress(data, &mut sink, options, |progress| display.update(progress))
     } else {
         build_index_with_progress(data, options, |progress| display.update(progress))
     }
 }
 
-struct LimitedWriter<W> {
+struct LimitedOutput<W> {
     inner: W,
     written: usize,
     limit: Option<usize>,
 }
 
-impl<W> LimitedWriter<W> {
+impl<W> LimitedOutput<W> {
     fn new(inner: W, limit: Option<usize>) -> Self {
         Self { inner, written: 0, limit }
     }
-}
 
-impl<W: Write> Write for LimitedWriter<W> {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        if self.limit.is_some_and(|limit| self.written.saturating_add(buffer.len()) > limit) {
+    fn check(&self, count: usize) -> io::Result<()> {
+        if self.limit.is_some_and(|limit| self.written.saturating_add(count) > limit) {
             return Err(io::Error::new(io::ErrorKind::InvalidData, format!("decoded output exceeds {}", format_bytes(self.limit.unwrap() as u64))));
         }
+        Ok(())
+    }
+}
+
+impl<W: Write> Write for LimitedOutput<W> {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.check(buffer.len())?;
         let written = self.inner.write(buffer)?;
         self.written += written;
         Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+impl<W: OutputSink> OutputSink for LimitedOutput<W> {
+    fn write_borrowed(&mut self, buffer: &[u8]) -> io::Result<()> {
+        self.check(buffer.len())?;
+        self.inner.write_borrowed(buffer)?;
+        self.written += buffer.len();
+        Ok(())
+    }
+
+    fn write_owned_from(&mut self, buffer: Vec<u8>, start: usize) -> io::Result<()> {
+        let length = buffer.get(start..).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "owned chunk start exceeds its length"))?.len();
+        self.check(length)?;
+        self.inner.write_owned_from(buffer, start)?;
+        self.written += length;
+        Ok(())
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -367,6 +457,11 @@ fn format_extension(input: &Path) -> Option<(Format, &'static str)> {
         "tgz" => Some((Format::Gzip, "tar")),
         _ => None,
     }
+}
+
+fn is_tar_archive(input: &str) -> bool {
+    let input = input.to_ascii_lowercase();
+    [".tar.bz2", ".tar.bzip2", ".tbz", ".tbz2", ".tar.gz", ".tar.gzip", ".tgz"].iter().any(|extension| input.ends_with(extension))
 }
 
 fn default_output(input: &Path) -> PathBuf {

@@ -1,6 +1,4 @@
-use std::io::Write;
-
-use crate::{DecodeError, Error, Result, bz2_crc32, combine_stream_crc};
+use crate::{DecodeError, Error, OutputSink, Result, bz2_crc32, combine_stream_crc};
 
 const BLOCK_MAGIC: u64 = 0x3141_5926_5359;
 const END_MAGIC: u64 = 0x1772_4538_5090;
@@ -400,11 +398,7 @@ pub(crate) fn decode_block(data: &[u8], start_bit: u64, end_bit: u64, level: u8,
     Ok(output)
 }
 
-pub(crate) fn decode_serial(data: &[u8], output: &mut impl Write) -> Result<()> {
-    decode_serial_with_progress(data, output, &mut |_, _| {})
-}
-
-pub(crate) fn decode_serial_with_progress(data: &[u8], output: &mut impl Write, progress: &mut impl FnMut(u64, u64)) -> Result<()> {
+pub(crate) fn decode_serial_with_progress(data: &[u8], output: &mut impl OutputSink, progress: &mut impl FnMut(u64, u64)) -> Result<()> {
     let mut bits = Bits::at(data, 0)?;
     let mut decoder = Decoder::new();
     let mut decoded_bytes = 0_u64;
@@ -427,9 +421,9 @@ pub(crate) fn decode_serial_with_progress(data: &[u8], output: &mut impl Write, 
             match bits.magic()? {
                 BLOCK_MAGIC => {
                     let (block, crc, _) = decoder.block(&mut bits, level, None)?;
-                    output.write_all(&block)?;
-                    decoded_bytes =
-                        decoded_bytes.checked_add(block.len() as u64).ok_or_else(|| Error::InvalidConfiguration("decoded offset overflow".into()))?;
+                    let block_len = block.len() as u64;
+                    output.write_owned_from(block, 0)?;
+                    decoded_bytes = decoded_bytes.checked_add(block_len).ok_or_else(|| Error::InvalidConfiguration("decoded offset overflow".into()))?;
                     progress(bits.position().div_ceil(8), decoded_bytes);
                     combined_crc = combine_stream_crc(combined_crc, crc);
                 }
