@@ -12,6 +12,13 @@ def test_decompress_matches_libbz2_at_every_level(level):
     plain = patterned(20_000)
     assert fbz.decompress(bz2.compress(plain, compresslevel=level), threads=2) == plain
 
+def test_decompress_detects_every_stream_format():
+    plain = patterned(300_000)
+    encoded = [bz2.compress(plain), gzip.compress(plain), fbz.compress(plain, "lz4")]
+    for item in encoded: assert fbz.decompress(item, threads=2) == plain
+    assert fbz.decompress(encoded[1], "gzip", threads=2) == plain
+    with pytest.raises(ValueError, match="format"): fbz.decompress(encoded[0], "zip")
+
 def test_compress_stream_formats_and_options():
     plain = patterned(300_000)
     assert bz2.decompress(fbz.compress(plain, "bzip2", threads=2, level=3)) == plain
@@ -28,7 +35,7 @@ def test_parallel_multiblock_and_concatenated_are_deterministic():
 def test_bad_crc_raises_package_error():
     compressed = bytearray(bz2.compress(b"integrity matters"))
     compressed[-2] ^= 1
-    with pytest.raises(fbz.BadBzip2File): fbz.decompress(bytes(compressed))
+    with pytest.raises(fbz.BadCompressedFile): fbz.decompress(bytes(compressed))
 
 def test_seekable_file_and_persisted_index(tmp_path):
     plain = patterned(350_000)
@@ -38,7 +45,7 @@ def test_seekable_file_and_persisted_index(tmp_path):
     source.write_bytes(compressed)
     encoded = fbz.build_index(source, index_path, threads=2)
 
-    with fbz.open(source, index=index_path) as handle:
+    with fbz.open_indexed(source, index=index_path) as handle:
         assert handle.size == len(plain)
         assert handle.seek(99_990) == 99_990
         assert handle.read(40) == plain[99_990:100_030]
@@ -53,14 +60,46 @@ def test_index_is_bound_to_source():
     first = bz2.compress(b"first")
     second = bz2.compress(b"other")
     index = fbz.build_index(first)
-    with pytest.raises(ValueError, match="source identity mismatch"): fbz.open(second, index=index)
+    with pytest.raises(ValueError, match="source identity mismatch"): fbz.open_indexed(second, index=index)
 
-def test_buffered_reader_compatibility():
+@pytest.mark.parametrize("format", ["bzip2", "gzip", "lz4"])
+def test_buffered_reader_compatibility(tmp_path, format):
     plain = patterned(180_000)
-    with io.BufferedReader(fbz.open(bz2.compress(plain, compresslevel=1))) as handle:
+    source = tmp_path / f"data.{format}"
+    source.write_bytes(fbz.compress(plain, format, threads=2))
+    with io.BufferedReader(fbz.open(source, threads=2)) as handle:
         assert handle.read(1234) == plain[:1234]
-        handle.seek(100_000)
-        assert handle.read() == plain[100_000:]
+        assert handle.read() == plain[1234:]
+    assert handle.closed
+
+def test_stream_reader_readinto_and_explicit_format(tmp_path):
+    plain = patterned(2_000_000)
+    source = tmp_path / "misleading.bz2"
+    source.write_bytes(gzip.compress(plain))
+    target = bytearray(len(plain) + 100)
+    with fbz.Reader(source, format="gzip", threads=2) as handle:
+        count = handle.readinto(memoryview(target)[17:])
+        assert count <= 1024 * 1024
+        assert target[17:17 + count] == plain[:count]
+        assert bytes(target[17:17 + count]) + handle.read() == plain
+
+def test_stream_reader_reports_late_checksum_failure(tmp_path):
+    plain = patterned(1_000_000)
+    encoded = bytearray(gzip.compress(plain))
+    encoded[-8] ^= 1
+    source = tmp_path / "corrupt.gz"
+    source.write_bytes(encoded)
+    with fbz.open(source, threads=2) as handle:
+        with pytest.raises(fbz.BadCompressedFile): handle.read()
+
+def test_validates_all_stream_formats_from_paths_and_bytes(tmp_path):
+    plain = patterned(300_000)
+    for format in ("bzip2", "gzip", "lz4"):
+        encoded = fbz.compress(plain, format, threads=2)
+        source = tmp_path / f"data.{format}"
+        source.write_bytes(encoded)
+        assert fbz.test(encoded, threads=2) is None
+        assert fbz.test(source, threads=2) is None
 
 def test_native_decode_releases_gil():
     plain = patterned(2_000_000)

@@ -2,7 +2,7 @@ from collections import namedtuple
 import io, os
 from pathlib import Path
 
-from ._core import BadBzip2File, _IndexedReader, __version__, _build_index, _compress, _decompress, _scan, _test, bz2_crc32
+from ._core import BadCompressedFile, _IndexedReader, _Reader, __version__, _build_index, _compress, _decompress, _scan, _test_bytes, _test_path, bz2_crc32
 
 DEFAULT_MEMORY_LIMIT = 1024 * 1024 * 1024
 DEFAULT_CACHE_LIMIT = 64 * 1024 * 1024
@@ -24,9 +24,9 @@ def scan(data: bytes) -> ScanResult:
     stream_ends = [EndCandidate(*item) for item in stream_ends]
     return ScanResult(streams, blocks, stream_ends)
 
-def decompress(data: bytes, *, threads=0, memory_limit=DEFAULT_MEMORY_LIMIT) -> bytes:
-    "Decompress and fully CRC-validate one or more concatenated bzip2 streams."
-    return _decompress(data, threads, memory_limit)
+def decompress(data: bytes, format=None, *, threads=0, memory_limit=DEFAULT_MEMORY_LIMIT) -> bytes:
+    "Decompress and validate bzip2, gzip, or LZ4 bytes, selected by magic unless *format* is given."
+    return _decompress(data, format, threads, memory_limit)
 
 def compress(data: bytes, format: str, *, threads=0, memory_limit=DEFAULT_MEMORY_LIMIT, level=None) -> bytes:
     "Compress *data* as bzip2, gzip, or LZ4."
@@ -79,8 +79,33 @@ class IndexedBzip2File(io.RawIOBase):
         self._reader = None
         super().close()
 
-def open(source, *, threads=0, index=None, memory_limit=DEFAULT_MEMORY_LIMIT, cache_limit=DEFAULT_CACHE_LIMIT):
-    "Open a path or bytes object as a seekable bzip2 binary file."
+class Reader(io.RawIOBase):
+    "Streaming binary reader for a bzip2, gzip, or LZ4 file."
+
+    def __init__(self, path, *, format=None, threads=0, memory_limit=DEFAULT_MEMORY_LIMIT):
+        super().__init__()
+        self._reader = _Reader.from_path(os.fspath(path), format, threads, memory_limit)
+
+    def readable(self): return True
+
+    def read(self, size=-1):
+        self._checkClosed()
+        return self._reader.read(size)
+
+    def readinto(self, buffer):
+        self._checkClosed()
+        return self._reader.readinto(buffer)
+
+    def close(self):
+        self._reader = None
+        super().close()
+
+def open(path, *, format=None, threads=0, memory_limit=DEFAULT_MEMORY_LIMIT):
+    "Open a bzip2, gzip, or LZ4 path as a streaming binary file."
+    return Reader(path, format=format, threads=threads, memory_limit=memory_limit)
+
+def open_indexed(source, *, threads=0, index=None, memory_limit=DEFAULT_MEMORY_LIMIT, cache_limit=DEFAULT_CACHE_LIMIT):
+    "Open a path or bytes object as a seekable indexed bzip2 binary file."
     return IndexedBzip2File(source, threads=threads, index=index, memory_limit=memory_limit, cache_limit=cache_limit)
 
 def build_index(source, path=None, *, threads=0, memory_limit=DEFAULT_MEMORY_LIMIT) -> bytes:
@@ -92,13 +117,12 @@ def build_index(source, path=None, *, threads=0, memory_limit=DEFAULT_MEMORY_LIM
     if path is not None: Path(path).write_bytes(encoded)
     return encoded
 
-def test(source, *, threads=0, memory_limit=DEFAULT_MEMORY_LIMIT):
-    "Fully decode and CRC-validate *source*, returning ``None`` on success."
-    if isinstance(source, (bytes, bytearray, memoryview)):
-        _IndexedReader.from_bytes(bytes(source), threads, memory_limit, None, DEFAULT_CACHE_LIMIT)
-    else: _test(os.fspath(source), threads, memory_limit)
+def test(source, format=None, *, threads=0, memory_limit=DEFAULT_MEMORY_LIMIT):
+    "Fully decode and validate a bzip2, gzip, or LZ4 *source*, returning ``None`` on success."
+    if isinstance(source, (bytes, bytearray, memoryview)): _test_bytes(bytes(source), format, threads, memory_limit)
+    else: _test_path(os.fspath(source), format, threads, memory_limit)
 
 __all__ = [
-    "__version__", "BadBzip2File", "BlockCandidate", "DEFAULT_CACHE_LIMIT", "DEFAULT_MEMORY_LIMIT", "EndCandidate",
-    "IndexedBzip2File", "ScanResult", "StreamHeaderCandidate", "build_index", "bz2_crc32", "compress", "decompress", "open", "scan", "test"
+    "__version__", "BadCompressedFile", "BlockCandidate", "DEFAULT_CACHE_LIMIT", "DEFAULT_MEMORY_LIMIT", "EndCandidate",
+    "IndexedBzip2File", "Reader", "ScanResult", "StreamHeaderCandidate", "build_index", "bz2_crc32", "compress", "decompress", "open", "open_indexed", "scan", "test"
 ]

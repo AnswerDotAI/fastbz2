@@ -1243,8 +1243,6 @@ fn invalid_bit(bit: usize, message: impl Into<String>) -> Error {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write as _;
-
     use flate2::{
         Compression, GzBuilder,
         write::{DeflateEncoder, GzEncoder},

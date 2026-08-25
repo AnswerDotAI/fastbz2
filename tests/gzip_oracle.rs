@@ -61,7 +61,7 @@ fn large_stored_gzip_matches_oracle() {
     let plain = random_bytes(20 * 1024 * 1024);
     let encoded = compress(&plain);
     assert!(encoded.len() >= 16 * 1024 * 1024);
-    let options = DecodeOptions { threads: 4, memory_limit: 256 * 1024 * 1024 };
+    let options = DecodeOptions { threads: 4, memory_limit: 256 * 1024 * 1024, ..DecodeOptions::default() };
     assert_eq!(gzip::decompress_with_options(&encoded, options).unwrap(), oracle_decompress(&encoded));
 }
 
@@ -74,7 +74,7 @@ fn parallel_dynamic_gzip_matches_oracle() {
     encoded.extend(compress(&stored));
     plain.extend(stored);
     assert!(encoded.len() >= 32 * 1024 * 1024);
-    let options = DecodeOptions { threads: 4, memory_limit: 256 * 1024 * 1024 };
+    let options = DecodeOptions { threads: 4, memory_limit: 256 * 1024 * 1024, ..DecodeOptions::default() };
     let mut decoded = Vec::new();
     let report = gzip::decompress_to_writer_with_options(&encoded, &mut decoded, options).unwrap();
     assert!(report.speculative_chunks > 0);

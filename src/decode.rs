@@ -5,8 +5,8 @@ use rayon::{ThreadPool, ThreadPoolBuilder};
 use crate::format::scan_with_pool;
 use crate::pipeline::{Job, OrderedResults, PipelineLimits, run_ordered};
 use crate::{
-    BlockCandidate, BlockIndex, DecodeError, EndCandidate, Error, Index, MAX_DECODED_BLOCK, OutputSink, Result, StreamIndex, WriterSink, combine_stream_crc,
-    decoder,
+    BlockCandidate, BlockIndex, DecodeError, DecodeFormat, EndCandidate, Error, Index, MAX_DECODED_BLOCK, OutputSink, Result, StreamIndex, WriterSink,
+    combine_stream_crc, decoder,
 };
 
 pub const DEFAULT_MEMORY_LIMIT: usize = 1024 * 1024 * 1024;
@@ -19,6 +19,8 @@ pub struct DecodeProgress {
 
 #[derive(Clone, Copy, Debug)]
 pub struct DecodeOptions {
+    /// Compression format, or automatic magic/filename detection.
+    pub format: DecodeFormat,
     /// Zero selects the process's available parallelism.
     pub threads: usize,
     /// Maximum decoded bytes reserved for in-flight and completed speculative blocks.
@@ -27,7 +29,7 @@ pub struct DecodeOptions {
 
 impl Default for DecodeOptions {
     fn default() -> Self {
-        Self { threads: 0, memory_limit: DEFAULT_MEMORY_LIMIT }
+        Self { format: DecodeFormat::Auto, threads: 0, memory_limit: DEFAULT_MEMORY_LIMIT }
     }
 }
 
@@ -435,7 +437,7 @@ mod tests {
             compressed.extend_from_slice(&compress(&plain, Level::BEST));
             expected.extend_from_slice(&plain);
         }
-        let options = DecodeOptions { threads: 4, memory_limit: MAX_DECODED_BLOCK * 2 };
+        let options = DecodeOptions { threads: 4, memory_limit: MAX_DECODED_BLOCK * 2, ..DecodeOptions::default() };
         assert_eq!(decompress(&compressed, options).unwrap(), expected);
     }
 

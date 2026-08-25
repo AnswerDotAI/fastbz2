@@ -120,7 +120,7 @@ fbz --list --json dump.xml.bz2   # emit the complete layout as JSON
 
 ## Python
 
-The Python API exposes one-shot compression for all three stream formats. Decompression, validation, scanning, and indexed seeking currently expose the bzip2 backend.
+The Python API exposes compression, decompression, validation, and streaming reads for all three stream formats. Bzip2 additionally supports indexed seeking and structural scanning.
 
 ### One-shot compression
 
@@ -141,18 +141,31 @@ plain = fbz.decompress(compressed_bytes)
 fbz.test("dump.xml.bz2")  # returns None after successful validation
 ```
 
-`decompress` accepts a bytes-like object and returns `bytes`. `test` accepts either compressed bytes or a path and avoids retaining the decoded result.
+`decompress` accepts a bytes-like object, detects bzip2, gzip, or LZ4 from its magic, and returns `bytes`. Pass `format="gzip"` (or `"bzip2"`/`"lz4"`) to override detection. `test` accepts either compressed bytes or a path and avoids retaining the decoded result.
+
+### Streaming reads
+
+`fbz.open` and `fbz.Reader` start decoding a file immediately and implement Python's raw binary I/O interface. They do not index first or retain the plaintext; wrap them in `io.BufferedReader` when buffering is useful:
+
+```python
+import io, fbz
+
+with io.BufferedReader(fbz.open("events.json.gz")) as f:
+    header = f.read(4096)
+```
+
+They validate the complete stream and report a late checksum failure as `fbz.BadCompressedFile` rather than EOF. Dropping or closing a reader early cancels and joins its workers. Compressed tar inputs yield tar bytes; ZIP remains an archive rather than a byte-stream reader.
 
 ### Seekable reads and persistent indexes
 
-`fbz.open` returns a seekable binary `io.RawIOBase`. Opening without an index performs a complete validation pass and builds an in-memory block index; `build_index` can persist that work for later processes:
+`fbz.open_indexed` returns a seekable bzip2 `io.RawIOBase`. Opening without an index performs a complete validation pass and builds an in-memory block index; `build_index` can persist that work for later processes:
 
 ```python
 import fbz
 
 fbz.build_index("dump.xml.bz2", "dump.xml.bz2.fbz2i")
 
-with fbz.open("dump.xml.bz2", index="dump.xml.bz2.fbz2i") as f:
+with fbz.open_indexed("dump.xml.bz2", index="dump.xml.bz2.fbz2i") as f:
     f.seek(1_000_000_000)
     chunk = f.read(64 * 1024)
     print(f.tell(), f.size)
@@ -172,7 +185,7 @@ result = scan(bz2.compress(b"hello"))
 assert result.blocks[0].bit_offset == 32
 ```
 
-Scan results are deliberately untrusted candidates. Use `test`, `decompress`, `build_index`, or `open` when validation is required.
+Scan results are deliberately untrusted candidates. Use `test`, `decompress`, `build_index`, or successfully exhaust a streaming reader when validation is required.
 
 ## Rust
 
@@ -189,7 +202,7 @@ fn main() -> fbz::Result<()> {
 }
 ```
 
-`decompress` returns a `Vec<u8>`. `decode_to_writer` returns a validated `Index` while streaming output, `build_index` validates into a sink, and their `*_with_progress` variants report completed compressed and decoded byte counts. `IndexedReader` implements `Read` and `Seek`; it can build an index itself or load a persisted one with `open_with_index`.
+`decompress` returns a `Vec<u8>` and detects bzip2, gzip, or LZ4 from magic. Set `DecodeOptions::format` to a `DecodeFormat` variant to override detection. `decompress_to_writer` and its progress variant use the same dispatcher and codec implementations. The bzip2-specific `decode_to_writer` returns a validated `Index`, while `build_index` validates into a sink. `IndexedReader` implements `Read` and `Seek`; it can build an index itself or load a persisted one with `open_with_index`.
 
 The unified compression API covers bzip2, gzip, and LZ4 and writes incrementally:
 
@@ -243,7 +256,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Magic takes priority over the filename extension, with the extension used as a fallback for damaged headers. The decoder runs on an owned worker thread and transfers completed decoder allocations through a zero-capacity pipe; it neither materializes the plaintext nor writes an intermediate file. `DecodeOptions` controls decoder threads and speculative memory. Dropping early disconnects the pipe, cancels outstanding work, and joins the worker.
+Magic takes priority over the filename extension, with the extension used as a fallback for damaged headers; an explicit `DecodeOptions::format` overrides both. The decoder runs on an owned worker thread and transfers completed decoder allocations through a zero-capacity pipe; it neither materializes the plaintext nor writes an intermediate file. `DecodeOptions` controls format selection, decoder threads, and speculative memory. Dropping early disconnects the pipe, cancels outstanding work, and joins the worker.
 
 Checksum errors discovered after output has begun are returned by a later `read()` call. Therefore only successful EOF establishes that the complete stream was valid; dropping early deliberately does not finish validation. Compressed tar inputs yield the decoded tar byte stream rather than extracting it. ZIP is not exposed through `Reader` because an archive has no single decoded byte stream.
 

@@ -52,7 +52,7 @@ impl Reader {
         let options = options.validate()?;
         let path = path.as_ref();
         let source = Source::open(path)?;
-        let format = Format::detect(path, source.as_slice())?;
+        let format = options.format.detect_path(path, source.as_slice())?;
         if !matches!(format, Format::Bzip2 | Format::Gzip | Format::Lz4) {
             return Err(Error::UnsupportedFormat("fbz::Reader supports bzip2, gzip, and LZ4 streams".into()));
         }
