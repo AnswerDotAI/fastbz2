@@ -17,10 +17,81 @@ fn write_compressed(path: &Path, plain: &[u8]) {
     fs::write(path, compress(plain, Level::FASTEST)).unwrap();
 }
 
-fn write_gzip(path: &Path, plain: &[u8]) {
+fn gzip_bytes(plain: &[u8]) -> Vec<u8> {
     let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
     encoder.write_all(plain).unwrap();
-    fs::write(path, encoder.finish().unwrap()).unwrap();
+    encoder.finish().unwrap()
+}
+
+fn write_gzip(path: &Path, plain: &[u8]) {
+    fs::write(path, gzip_bytes(plain)).unwrap();
+}
+fn tar_bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut archive = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut archive);
+        for (path, contents) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o640);
+            header.set_mtime(1_700_000_123);
+            header.set_cksum();
+            builder.append_data(&mut header, path, *contents).unwrap();
+        }
+        builder.finish().unwrap();
+    }
+    archive
+}
+
+fn write_tgz(path: &Path, entries: &[(&str, &[u8])]) {
+    write_gzip(path, &tar_bytes(entries));
+}
+
+fn traversal_tar() -> Vec<u8> {
+    let contents = b"must stay inside destination";
+    let mut header = tar::Header::new_gnu();
+    header.set_size(contents.len() as u64);
+    header.set_mode(0o644);
+    header.set_path("safe.txt").unwrap();
+    header.as_mut_bytes()[..100].fill(0);
+    header.as_mut_bytes()[..14].copy_from_slice(b"../outside.txt");
+    header.set_cksum();
+
+    let mut archive = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut archive);
+        builder.append(&header, contents.as_slice()).unwrap();
+        builder.finish().unwrap();
+    }
+    archive
+}
+
+fn linked_tar() -> Vec<u8> {
+    let contents = b"linked contents";
+    let mut archive = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut archive);
+        let mut file = tar::Header::new_gnu();
+        file.set_size(contents.len() as u64);
+        file.set_mode(0o640);
+        file.set_mtime(1_700_000_123);
+        file.set_cksum();
+        builder.append_data(&mut file, "root.txt", contents.as_slice()).unwrap();
+
+        for (path, entry_type) in [("symbolic.txt", tar::EntryType::Symlink), ("hard.txt", tar::EntryType::Link)] {
+            let mut link = tar::Header::new_gnu();
+            link.set_path(path).unwrap();
+            link.set_link_name("root.txt").unwrap();
+            link.set_entry_type(entry_type);
+            link.set_size(0);
+            link.set_mode(0o777);
+            link.set_mtime(1_700_000_123);
+            link.set_cksum();
+            builder.append(&link, std::io::empty()).unwrap();
+        }
+        builder.finish().unwrap();
+    }
+    archive
 }
 
 #[test]
@@ -266,7 +337,7 @@ fn gzip_magic_fallback_stdin_limits_and_corruption_work() {
 }
 
 #[test]
-fn mixed_bzip2_and_gzip_inputs_share_output_policy() {
+fn mixed_bzip2_gzip_and_tar_inputs_share_output_policy() {
     let directory = tempfile::tempdir().unwrap();
     let bzip2 = directory.path().join("first.bz2");
     let gzip = directory.path().join("second.gz");
@@ -274,11 +345,124 @@ fn mixed_bzip2_and_gzip_inputs_share_output_policy() {
     let output_dir = directory.path().join("decoded");
     write_compressed(&bzip2, b"bzip2");
     write_gzip(&gzip, b"gzip");
-    write_gzip(&tgz, b"tar payload");
+    write_tgz(&tgz, &[("from-tar.txt", b"tar payload")]);
 
     let decoded = binary().args(["-C", output_dir.to_str().unwrap(), bzip2.to_str().unwrap(), gzip.to_str().unwrap(), tgz.to_str().unwrap()]).output().unwrap();
     assert!(decoded.status.success(), "{}", String::from_utf8_lossy(&decoded.stderr));
     assert_eq!(fs::read(output_dir.join("first")).unwrap(), b"bzip2");
     assert_eq!(fs::read(output_dir.join("second")).unwrap(), b"gzip");
-    assert_eq!(fs::read(output_dir.join("bundle.tar")).unwrap(), b"tar payload");
+    assert_eq!(fs::read(output_dir.join("from-tar.txt")).unwrap(), b"tar payload");
+}
+
+#[test]
+fn tar_gzip_and_bzip2_auto_extract_or_decode_raw() {
+    let directory = tempfile::tempdir().unwrap();
+    let tar_gzip = directory.path().join("bundle.tar.gz");
+    let tar_bzip2 = directory.path().join("bundle.tar.bz2");
+    let gzip_output = directory.path().join("from-gzip");
+    let bzip2_output = directory.path().join("from-bzip2");
+    let raw_output = directory.path().join("bundle.tar");
+    let long_path = format!("nested/{}/contents.txt", "long-segment-".repeat(10));
+    let entries = [("root.txt", b"root contents".as_slice()), (long_path.as_str(), b"nested contents".as_slice())];
+    let plain_tar = tar_bytes(&entries);
+    write_gzip(&tar_gzip, &plain_tar);
+    write_compressed(&tar_bzip2, &plain_tar);
+
+    let gzip = binary().args(["-C", gzip_output.to_str().unwrap(), tar_gzip.to_str().unwrap()]).output().unwrap();
+    assert!(gzip.status.success(), "{}", String::from_utf8_lossy(&gzip.stderr));
+    let bzip2 = binary().args(["-C", bzip2_output.to_str().unwrap(), tar_bzip2.to_str().unwrap()]).output().unwrap();
+    assert!(bzip2.status.success(), "{}", String::from_utf8_lossy(&bzip2.stderr));
+    for output in [&gzip_output, &bzip2_output] {
+        assert_eq!(fs::read(output.join("root.txt")).unwrap(), b"root contents");
+        assert_eq!(fs::read(output.join(&long_path)).unwrap(), b"nested contents");
+    }
+
+    let raw = binary().args([tar_gzip.to_str().unwrap(), "-o", raw_output.to_str().unwrap()]).output().unwrap();
+    assert!(raw.status.success());
+    assert_eq!(fs::read(raw_output).unwrap(), plain_tar);
+}
+
+#[test]
+fn tar_extraction_is_validated_before_entries_are_committed() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("policy.tgz");
+    let output = directory.path().join("output");
+    fs::create_dir(&output).unwrap();
+    fs::write(output.join("existing.txt"), b"keep me").unwrap();
+    write_tgz(&input, &[("new.txt", b"new"), ("existing.txt", b"replacement")]);
+
+    let skipped_output = directory.path().join("skipped");
+    let skipped = binary().args(["--skip-existing", "-C", skipped_output.to_str().unwrap(), input.to_str().unwrap()]).output().unwrap();
+    assert_eq!(skipped.status.code(), Some(2));
+    assert!(!skipped_output.exists());
+
+    let rejected = binary().args(["-C", output.to_str().unwrap(), input.to_str().unwrap()]).output().unwrap();
+    assert_eq!(rejected.status.code(), Some(1));
+    assert_eq!(fs::read(output.join("existing.txt")).unwrap(), b"keep me");
+    assert!(!output.join("new.txt").exists());
+
+    let replaced = binary().args(["--force", "-C", output.to_str().unwrap(), input.to_str().unwrap()]).output().unwrap();
+    assert!(replaced.status.success(), "{}", String::from_utf8_lossy(&replaced.stderr));
+    assert_eq!(fs::read(output.join("existing.txt")).unwrap(), b"replacement");
+    assert_eq!(fs::read(output.join("new.txt")).unwrap(), b"new");
+
+    fs::remove_dir_all(&output).unwrap();
+    let mut corrupt = fs::read(&input).unwrap();
+    let crc = corrupt.len() - 8;
+    corrupt[crc] ^= 1;
+    fs::write(&input, corrupt).unwrap();
+    let corrupt_result = binary().args(["--rm", "-C", output.to_str().unwrap(), input.to_str().unwrap()]).output().unwrap();
+    assert_eq!(corrupt_result.status.code(), Some(3));
+    assert!(input.exists());
+    assert!(!output.join("new.txt").exists());
+}
+
+#[test]
+fn explicit_extract_supports_stdin_limits_and_rejects_traversal() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = directory.path().join("output");
+    let plain_tar = tar_bytes(&[("stdin.txt", b"streamed")]);
+    let compressed = gzip_bytes(&plain_tar);
+
+    let mut child = binary().args(["--extract", "-C", output.to_str().unwrap(), "-"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    child.stdin.take().unwrap().write_all(&compressed).unwrap();
+    let extracted = child.wait_with_output().unwrap();
+    assert!(extracted.status.success(), "{}", String::from_utf8_lossy(&extracted.stderr));
+    assert_eq!(fs::read(output.join("stdin.txt")).unwrap(), b"streamed");
+
+    let limited = directory.path().join("limited");
+    let limit = (plain_tar.len() - 1).to_string();
+    let mut limited_child = binary().args(["--extract", "--max-output", &limit, "-C", limited.to_str().unwrap(), "-"]).stdin(Stdio::piped()).spawn().unwrap();
+    limited_child.stdin.take().unwrap().write_all(&compressed).unwrap();
+    let limited_result = limited_child.wait().unwrap();
+    assert_eq!(limited_result.code(), Some(3));
+    assert!(!limited.join("stdin.txt").exists());
+
+    let traversal = directory.path().join("traversal.tgz");
+    write_gzip(&traversal, &traversal_tar());
+    let traversal_output = directory.path().join("traversal-output");
+    let result = binary().args(["-C", traversal_output.to_str().unwrap(), traversal.to_str().unwrap()]).output().unwrap();
+    assert!(result.status.success());
+    assert_eq!(fs::read_dir(&traversal_output).unwrap().count(), 0);
+    assert!(!directory.path().join("outside.txt").exists());
+}
+#[test]
+#[cfg(unix)]
+fn tar_staging_preserves_symbolic_and_hard_links() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("links.tgz");
+    let output = directory.path().join("output");
+    write_gzip(&input, &linked_tar());
+
+    let result = binary().args(["--rm", "-C", output.to_str().unwrap(), input.to_str().unwrap()]).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert!(!input.exists());
+    assert_eq!(fs::read_link(output.join("symbolic.txt")).unwrap(), Path::new("root.txt"));
+    assert_eq!(fs::read(output.join("hard.txt")).unwrap(), b"linked contents");
+    let root_metadata = fs::metadata(output.join("root.txt")).unwrap();
+    assert_eq!(root_metadata.ino(), fs::metadata(output.join("hard.txt")).unwrap().ino());
+    assert_eq!(root_metadata.permissions().mode() & 0o777, 0o640);
+    assert_eq!(root_metadata.modified().unwrap().duration_since(UNIX_EPOCH).unwrap().as_secs(), 1_700_000_123);
 }

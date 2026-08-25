@@ -10,6 +10,7 @@ mod format;
 pub mod gzip;
 mod index;
 mod indexed;
+mod output;
 mod pipeline;
 mod source;
 
@@ -18,12 +19,13 @@ pub use block::{MAX_DECODED_BLOCK, MAX_ENCODED_BLOCK, decode_block};
 pub use crc::{bz2_crc32, combine_stream_crc};
 pub use decode::{
     DEFAULT_MEMORY_LIMIT, DecodeOptions, DecodeProgress, build_index, build_index_with_progress, decode_to_writer, decode_to_writer_with_progress, decompress,
-    decompress_to_writer, decompress_to_writer_with_progress,
+    decompress_to_sink_with_progress, decompress_to_writer, decompress_to_writer_with_progress,
 };
 pub use error::{DecodeError, Error, Result};
 pub use format::{BLOCK_MAGIC, BlockCandidate, END_MAGIC, EndCandidate, ScanResult, StreamHeaderCandidate, scan};
 pub use index::{BlockIndex, Index, StreamIndex};
 pub use indexed::{DEFAULT_CACHE_LIMIT, IndexedReader};
+pub use output::{OutputSink, WriterSink};
 pub use source::Source;
 
 #[cfg(feature = "python")]

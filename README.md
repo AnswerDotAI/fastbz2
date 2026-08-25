@@ -1,10 +1,10 @@
 # fastbz2
 
-An active compression-format research workbench with fast bzip2 and gzip decompression.
+An active compression-format research workbench with fast bzip2/gzip decompression and streaming tar extraction.
 
-`fastbz2` provides a native CLI, a Rust library, and a Python module. The CLI auto-selects an in-repo bzip2 or gzip decoder from the filename extension, falling back to stream magic when needed. Both decoders handle concatenated streams and fully validate their checksums. The bzip2 implementation also provides parallel decoding and persistent random-access indexes.
+`fastbz2` provides a native CLI, a Rust library, and a Python module. The CLI auto-selects an in-repo bzip2 or gzip decoder from the filename extension, falling back to stream magic when needed, and streams compressed tar variants through a bounded extractor. Both decoders handle concatenated streams and fully validate their checksums. The bzip2 implementation also provides parallel decoding and persistent random-access indexes.
 
-Compression and additional formats are planned, but the current implementation decompresses bzip2 and gzip.
+Compression is planned, but the current implementation decompresses bzip2 and gzip and extracts their tar-wrapped variants.
 
 ## Install
 
@@ -25,24 +25,28 @@ cargo add fastbz2 --git https://github.com/AnswerDotAI/fastbz2
 
 ## CLI
 
-Decoding is the default operation. `.bz2`, `.bzip2`, `.gz`, and `.gzip` select their corresponding decoder and are removed from the output name. `.tbz`, `.tbz2`, and `.tgz` produce a `.tar` filename; this currently decompresses the tar stream rather than extracting its entries. For stdin and unrecognised extensions, bzip2 or gzip magic selects the decoder. Other input names gain `.out`.
+Decoding is the default operation. `.bz2`, `.bzip2`, `.gz`, and `.gzip` select their corresponding decoder and are removed from the output name. Compressed tar names—`.tar.bz2`, `.tar.bzip2`, `.tbz`, `.tbz2`, `.tar.gz`, `.tar.gzip`, and `.tgz`—automatically extract into the current directory or `-C/--output-dir`. `-x/--extract` forces tar extraction for stdin or an unusual filename; an explicit `-o/--output` instead writes the decoded tar stream. For stdin and unrecognised extensions, bzip2 or gzip magic selects the decoder. Other non-archive input names gain `.out`.
 
 ```bash
-fastbz2 dump.xml.bz2                 # write dump.xml
-fastbz2 events.json.gz               # write events.json
-fastbz2 dump.xml.bz2 -o result.xml   # choose the output path
-fastbz2 dump.xml.bz2 -o -            # write plaintext to stdout
-fastbz2 -                             # read compressed data from stdin
+fastbz2 dump.xml.bz2                   # write dump.xml
+fastbz2 events.json.gz                 # write events.json
+fastbz2 source.tar.gz                  # extract into the current directory
+fastbz2 source.tbz2 -C unpacked        # extract into unpacked/
+fastbz2 --extract -C unpacked -        # extract gzip/bzip2 tar data from stdin
+fastbz2 source.tgz -o source.tar       # decode without extracting
+fastbz2 dump.xml.bz2 -o result.xml     # choose the decoded output path
+fastbz2 dump.xml.bz2 -o -              # write decoded bytes to stdout
 ```
 
-Multiple inputs are decoded in order, with parallelism applied inside each file. `-C/--output-dir` collects their outputs in one directory:
+Multiple inputs are processed in order, with parallelism applied inside each compressed stream. `-C/--output-dir` collects decoded files and is the extraction root for archives:
 
 ```bash
 fastbz2 data/*.bz2 logs/*.gz -C decoded
 fastbz2 data/*.bz2 logs/*.gz -C decoded --skip-existing
+fastbz2 backups/*.tgz -C restored
 ```
 
-The alternative modes are flags rather than subcommands:
+Validation and inspection remain flags rather than subcommands:
 
 ```bash
 fastbz2 --test dump.xml.bz2          # fully decode and validate, writing nothing
@@ -51,15 +55,16 @@ fastbz2 --list events.json.gz        # print the validated member/block layout
 fastbz2 --list --json dump.xml.bz2   # emit the complete layout as JSON
 ```
 
-`--test`, `--index`, and `--list` are mutually exclusive. Human-readable `--list` output labels each input when given multiple files; JSON output is one object for one input and an array for multiple inputs.
+`--test`, `--index`, `--list`, and explicit `--extract` are mutually exclusive. Human-readable `--list` output labels each input when given multiple files; JSON output is one object for one input and an array for multiple inputs.
 
 ### Output safety
 
-- Existing outputs are rejected by default. Use `--force` to replace them or `--skip-existing` to leave them untouched.
-- File outputs are written to a temporary file in the destination directory and persisted atomically only after successful CRC validation.
-- Extracted files inherit the compressed input's permissions and modification time.
-- `--rm` removes each compressed input only after its output has been persisted and its metadata copied successfully.
-- `--max-output SIZE` limits decoded bytes per input. Sizes accept binary suffixes such as `K`, `MiB`, and `G`.
+- Existing decoded files and archive entries are rejected by default. `--force` replaces them; `--skip-existing` applies to decoded files rather than archives.
+- Decoded-file outputs use a same-directory temporary file and become visible atomically only after successful checksum validation.
+- Tar entries stream into a same-filesystem staging directory through a bounded pipe. They are preflighted and moved into the destination only after both the compression stream and tar archive validate, so a late CRC failure leaves no extracted files.
+- Tar paths and link targets are confined to the destination; unsafe entries are skipped. New entries use the archive's permissions and modification times. Standalone decoded files inherit those values from the compressed input.
+- `--rm` removes each compressed input only after its decoded file or all archive entries have been committed successfully.
+- `--max-output SIZE` limits decoded bytes per input, including tar framing and padding. Sizes accept binary suffixes such as `K`, `MiB`, and `G`.
 
 Long interactive operations report completion, decoded throughput, compression ratio, and ETA on stderr. Progress is disabled automatically when stderr is redirected; `-q/--quiet` also suppresses progress and skip notices.
 
@@ -157,7 +162,7 @@ Full SimpleWiki recompressed with system `gzip -6` (`438,904,466` bytes compress
 | Decoder | Mode | Seconds | Peak physical footprint |
 |---|---|---:|---:|
 | rapidgzip-rust, local checkout | auto parallel, validation sink | 0.363 | 585 MiB |
-| fastbz2 | auto parallel, validation sink | 0.357 | 552 MiB |
+| fastbz2 | auto parallel, validation sink | 0.326 | 325 MiB |
 | Apple gzip | serial, stdout discarded | 1.371 | 1.2 MiB |
 
 The memory values use macOS physical footprint rather than `ru_maxrss`. The fastbz2 CLI memory-maps its 419 MiB input, so clean reclaimable file pages make RSS look roughly 419 MiB larger; `pread`-based tools leave the same cached pages outside process RSS. Physical footprint makes the comparison meaningful.

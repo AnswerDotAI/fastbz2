@@ -3,7 +3,7 @@
 use std::{io::Write, sync::OnceLock};
 
 use crate::{
-    DecodeOptions, DecodeProgress, Error, Result,
+    DecodeOptions, DecodeProgress, Error, OutputSink, Result, WriterSink,
     pipeline::{Job, PipelineLimits, run_staged_ordered},
 };
 
@@ -11,8 +11,8 @@ const WINDOW_SIZE: usize = 32 * 1024;
 const OUTPUT_CHUNK: usize = 64 * 1024;
 const HISTORY_COMPACT: usize = 1024 * 1024;
 const MAX_CODE_BITS: usize = 15;
-const PARALLEL_GRID: usize = 1024 * 1024;
-const MIN_PARALLEL_INPUT: usize = 16 * PARALLEL_GRID;
+const PARALLEL_GRID: usize = 512 * 1024;
+const MIN_PARALLEL_INPUT: usize = 16 * 1024 * 1024;
 const PARALLEL_OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
 const PARALLEL_JOB_MEMORY: usize = 2 * PARALLEL_OUTPUT_LIMIT + 64 * 1024;
 
@@ -111,24 +111,36 @@ pub fn decompress_to_writer_with_options_and_progress(
     data: &[u8],
     output: &mut impl Write,
     options: DecodeOptions,
+    progress: impl FnMut(DecodeProgress),
+) -> Result<Report> {
+    let mut output = WriterSink::new(output);
+    decompress_to_sink_with_options_and_progress(data, &mut output, options, progress)
+}
+
+/// Decode into an output that can take ownership of completed chunks.
+#[doc(hidden)]
+pub fn decompress_to_sink_with_options_and_progress(
+    data: &[u8],
+    output: &mut impl OutputSink,
+    options: DecodeOptions,
     mut progress: impl FnMut(DecodeProgress),
 ) -> Result<Report> {
     let mut options = options.validate()?;
     let threads = options.resolved_threads();
     options.threads = threads;
     if threads == 1 || data.len() < MIN_PARALLEL_INPUT || options.memory_limit < PARALLEL_JOB_MEMORY {
-        return decompress_serial_to_writer_with_progress(data, output, progress);
+        return decompress_serial_to_sink_with_progress(data, output, progress);
     }
     let header = parse_header(data, 0)?;
     let first_grid = header.deflate_start.saturating_add(PARALLEL_GRID);
     let initial_segment = match decode_segment(data, header.deflate_start * 8, first_grid.min(data.len()) * 8, InitialHistory::Empty, PARALLEL_OUTPUT_LIMIT) {
         Ok(segment) => segment,
-        Err(_) => return decompress_serial_to_writer_with_progress(data, output, progress),
+        Err(_) => return decompress_serial_to_sink_with_progress(data, output, progress),
     };
-    decompress_parallel_to_writer(data, output, options, threads, &mut progress, initial_segment)
+    decompress_parallel_to_sink(data, output, options, threads, &mut progress, initial_segment)
 }
 
-fn decompress_serial_to_writer_with_progress(data: &[u8], output: &mut impl Write, mut progress: impl FnMut(DecodeProgress)) -> Result<Report> {
+fn decompress_serial_to_sink_with_progress(data: &[u8], output: &mut impl OutputSink, mut progress: impl FnMut(DecodeProgress)) -> Result<Report> {
     let mut members = Vec::new();
     let mut blocks = Vec::new();
     let mut position = 0_usize;
@@ -306,6 +318,7 @@ struct Segment {
     marked: Vec<u16>,
     clean: Vec<u8>,
     clean_start: usize,
+    clean_crc: crc32fast::Hasher,
     blocks: Vec<Block>,
     final_block: bool,
 }
@@ -335,12 +348,15 @@ fn decode_segment(data: &[u8], start_bit: usize, stop_bit: usize, history: Initi
             break false;
         }
     };
+    let mut clean_crc = crc32fast::Hasher::new();
+    clean_crc.update(&emitter.clean[emitter.clean_start..]);
     Ok(Segment {
         start_bit,
         end_bit: bits.position_bits(),
         marked: emitter.marked,
         clean: emitter.clean,
         clean_start: emitter.clean_start,
+        clean_crc,
         blocks,
         final_block,
     })
@@ -499,7 +515,7 @@ fn resolve_segment(segment: Segment, predecessor: &[u8]) -> Result<ResolvedSegme
     let marked = resolve_symbols(&segment.marked, predecessor)?;
     let mut crc = crc32fast::Hasher::new();
     crc.update(&marked);
-    crc.update(&segment.clean[segment.clean_start..]);
+    crc.combine(&segment.clean_crc);
     Ok(ResolvedSegment { marked, clean: segment.clean, clean_start: segment.clean_start, blocks: segment.blocks, compressed_end_bit: segment.end_bit, crc })
 }
 
@@ -513,30 +529,31 @@ struct SegmentCommitter<'a, W: ?Sized, P: ?Sized> {
     progress: &'a mut P,
 }
 
-impl<'a, W: Write + ?Sized, P: FnMut(DecodeProgress) + ?Sized> SegmentCommitter<'a, W, P> {
+impl<'a, W: OutputSink + ?Sized, P: FnMut(DecodeProgress) + ?Sized> SegmentCommitter<'a, W, P> {
     fn new(member: u32, decoded_base: u64, output: &'a mut W, blocks: &'a mut Vec<Block>, progress: &'a mut P) -> Self {
         Self { member, decoded_base, decoded: 0, output, crc: crc32fast::Hasher::new(), blocks, progress }
     }
 
-    fn commit(&mut self, mut segment: ResolvedSegment) -> Result<()> {
-        self.output.write_all(&segment.marked)?;
-        self.output.write_all(&segment.clean[segment.clean_start..])?;
-        self.crc.combine(&segment.crc);
-        let decoded_len = segment.marked.len() + segment.clean.len() - segment.clean_start;
-        for block in &mut segment.blocks {
+    fn commit(&mut self, segment: ResolvedSegment) -> Result<()> {
+        let ResolvedSegment { marked, clean, clean_start, mut blocks, compressed_end_bit, crc } = segment;
+        let decoded_len = marked.len() + clean.len() - clean_start;
+        self.output.write_owned_from(marked, 0)?;
+        self.output.write_owned_from(clean, clean_start)?;
+        self.crc.combine(&crc);
+        for block in &mut blocks {
             block.member = self.member;
             block.decoded_start += self.decoded_base + self.decoded;
         }
         self.decoded = self.decoded.checked_add(decoded_len as u64).ok_or_else(|| invalid("decoded offset overflow"))?;
-        self.blocks.append(&mut segment.blocks);
-        (self.progress)(DecodeProgress { compressed_bytes: segment.compressed_end_bit.div_ceil(8) as u64, decoded_bytes: self.decoded_base + self.decoded });
+        self.blocks.append(&mut blocks);
+        (self.progress)(DecodeProgress { compressed_bytes: compressed_end_bit.div_ceil(8) as u64, decoded_bytes: self.decoded_base + self.decoded });
         Ok(())
     }
 }
 
-fn decompress_parallel_to_writer(
+fn decompress_parallel_to_sink(
     data: &[u8],
-    output: &mut impl Write,
+    output: &mut impl OutputSink,
     options: DecodeOptions,
     threads: usize,
     progress: &mut impl FnMut(DecodeProgress),
@@ -566,7 +583,7 @@ fn decompress_parallel_to_writer(
                     let compressed_base = position as u64;
                     let decoded_base = decoded_total;
                     let member_base = u32::try_from(members.len()).map_err(|_| invalid("too many gzip members"))?;
-                    let mut suffix = decompress_serial_to_writer_with_progress(&data[position..], output, |item| {
+                    let mut suffix = decompress_serial_to_sink_with_progress(&data[position..], output, |item| {
                         progress(DecodeProgress {
                             compressed_bytes: compressed_base + item.compressed_bytes,
                             decoded_bytes: decoded_base + item.decoded_bytes,
@@ -1095,7 +1112,7 @@ struct Emitter<'a, W> {
     decoded_base: u64,
 }
 
-impl<'a, W: Write> Emitter<'a, W> {
+impl<'a, W: OutputSink> Emitter<'a, W> {
     fn new(output: &'a mut W, decoded_base: u64) -> Self {
         Self {
             output,
@@ -1164,7 +1181,7 @@ impl<'a, W: Write> Emitter<'a, W> {
         if pending.is_empty() {
             return Ok(());
         }
-        self.output.write_all(pending)?;
+        self.output.write_borrowed(pending)?;
         self.crc.update(pending);
         self.history_len = self.buffer.len();
         if self.buffer.len() >= HISTORY_COMPACT {
@@ -1183,7 +1200,7 @@ impl<'a, W: Write> Emitter<'a, W> {
     }
 }
 
-impl<W: Write> DeflateOutput for Emitter<'_, W> {
+impl<W: OutputSink> DeflateOutput for Emitter<'_, W> {
     fn total_decoded(&self) -> u64 {
         self.decoded_position()
     }
