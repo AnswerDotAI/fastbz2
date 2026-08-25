@@ -1,4 +1,4 @@
-//! LZ4 frame and block decompression implemented in safe Rust.
+//! LZ4 frame and block compression/decompression implemented in safe Rust.
 
 use std::{hash::Hasher, io::Write};
 
@@ -8,6 +8,8 @@ use twox_hash::XxHash32;
 use crate::history::extend_match;
 use crate::pipeline::{Job, PipelineLimits, run_ordered};
 use crate::{DecodeOptions, DecodeProgress, Error, OutputSink, Result, WriterSink};
+
+pub use crate::lz4_encode::{EncodeReport, Encoder, compress, compress_to_writer};
 
 const FRAME_MAGIC: u32 = 0x184d_2204;
 const LEGACY_MAGIC: u32 = 0x184c_2102;

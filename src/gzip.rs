@@ -1,9 +1,11 @@
-//! Gzip framing and DEFLATE decompression implemented in safe Rust.
+//! Gzip framing and DEFLATE compression/decompression implemented in safe Rust.
 
 use std::{io::Write, sync::OnceLock};
 
 use crate::{
-    DecodeOptions, DecodeProgress, Error, OutputSink, Result, WriterSink,
+    DecodeOptions, DecodeProgress, EncodeOptions, Error, OutputSink, Result, WriterSink,
+    deflate::{DISTANCE_BASE, DISTANCE_EXTRA, LENGTH_BASE, LENGTH_EXTRA},
+    deflate_encode,
     history::extend_match,
     pipeline::{Job, PipelineLimits, run_staged_ordered},
 };
@@ -16,12 +18,6 @@ const PARALLEL_GRID: usize = 512 * 1024;
 const MIN_PARALLEL_INPUT: usize = 16 * 1024 * 1024;
 const PARALLEL_OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
 const PARALLEL_JOB_MEMORY: usize = 2 * PARALLEL_OUTPUT_LIMIT + 64 * 1024;
-
-const LENGTH_BASE: [usize; 29] = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
-const LENGTH_EXTRA: [u8; 29] = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0];
-const DISTANCE_BASE: [usize; 30] =
-    [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577];
-const DISTANCE_EXTRA: [u8; 30] = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlockKind {
@@ -85,6 +81,65 @@ pub struct DeflateReport {
     pub blocks: Vec<Block>,
     pub speculative_chunks: u64,
     pub fallback_chunks: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EncodeReport {
+    pub input_len: u64,
+    pub output_len: u64,
+    pub crc: u32,
+}
+
+pub struct Encoder<W: Write> {
+    inner: deflate_encode::Encoder<W>,
+}
+
+impl<W: Write> Encoder<W> {
+    pub fn new(mut output: W, options: EncodeOptions) -> Result<Self> {
+        let options = deflate_encode::validate_options(options)?;
+        let extra_flags = match options.level_or(6) {
+            1..=2 => 4,
+            8..=9 => 2,
+            _ => 0,
+        };
+        output.write_all(&[0x1f, 0x8b, 8, 0, 0, 0, 0, 0, extra_flags, 255])?;
+        Ok(Self { inner: deflate_encode::Encoder::new(output, options)? })
+    }
+
+    pub fn finish(self) -> Result<(W, EncodeReport)> {
+        let (mut output, deflate) = self.inner.finish()?;
+        output.write_all(&deflate.crc.to_le_bytes())?;
+        output.write_all(&(deflate.input_len as u32).to_le_bytes())?;
+        output.flush()?;
+        Ok((output, EncodeReport { input_len: deflate.input_len, output_len: deflate.output_len + 18, crc: deflate.crc }))
+    }
+}
+
+impl<W: Write> Write for Encoder<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.inner.write(bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+pub fn compress(data: &[u8]) -> Result<Vec<u8>> {
+    compress_with_options(data, EncodeOptions::default())
+}
+
+pub fn compress_with_options(data: &[u8], options: EncodeOptions) -> Result<Vec<u8>> {
+    let mut output = Vec::new();
+    compress_to_writer(&mut std::io::Cursor::new(data), &mut output, options)?;
+    Ok(output)
+}
+
+pub fn compress_to_writer(input: &mut impl std::io::Read, output: &mut impl Write, options: EncodeOptions) -> Result<EncodeReport> {
+    let mut encoder = Encoder::new(output, options)?;
+    std::io::copy(input, &mut encoder)?;
+    let (_, report) = encoder.finish()?;
+    Ok(report)
 }
 
 #[derive(Clone, Debug)]

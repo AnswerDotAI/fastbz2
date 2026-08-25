@@ -18,14 +18,42 @@ const fn make_table() -> [u32; 256] {
 
 const TABLE: [u32; 256] = make_table();
 
+#[derive(Clone, Copy)]
+pub(crate) struct Bz2Crc {
+    state: u32,
+}
+
+impl Bz2Crc {
+    pub fn new() -> Self {
+        Self { state: u32::MAX }
+    }
+
+    #[inline]
+    pub fn push_repeat(&mut self, byte: u8, count: usize) {
+        for _ in 0..count {
+            let index = ((self.state >> 24) as u8 ^ byte) as usize;
+            self.state = (self.state << 8) ^ TABLE[index];
+        }
+    }
+
+    #[inline]
+    pub fn update(&mut self, data: &[u8]) {
+        for &byte in data {
+            let index = ((self.state >> 24) as u8 ^ byte) as usize;
+            self.state = (self.state << 8) ^ TABLE[index];
+        }
+    }
+
+    pub fn finish(self) -> u32 {
+        !self.state
+    }
+}
+
 /// Compute the CRC used for an uncompressed bzip2 block.
 pub fn bz2_crc32(data: &[u8]) -> u32 {
-    let mut crc = u32::MAX;
-    for &byte in data {
-        let index = ((crc >> 24) as u8 ^ byte) as usize;
-        crc = (crc << 8) ^ TABLE[index];
-    }
-    !crc
+    let mut crc = Bz2Crc::new();
+    crc.update(data);
+    crc.finish()
 }
 
 /// Add a block CRC to bzip2's combined stream CRC.

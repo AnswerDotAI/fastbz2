@@ -1,10 +1,15 @@
 use std::{
     collections::HashMap,
-    sync::{Condvar, Mutex, mpsc},
+    panic::{AssertUnwindSafe, catch_unwind},
+    sync::{
+        Arc, Condvar, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
 };
 
-use rayon::ThreadPool;
+use rayon::{ThreadPool, ThreadPoolBuilder};
 
 use crate::{Error, Result};
 
@@ -307,4 +312,102 @@ where
         }
         result
     })
+}
+
+type StreamingMessage<T> = (usize, usize, std::thread::Result<T>);
+
+/// A bounded, long-lived ordered worker pool for streaming producers.
+///
+/// Reservations cover both a job's owned input and its retained result until
+/// the coordinator consumes that result. This is deliberately conservative:
+/// codecs can account for temporary worker allocations in the reservation too.
+pub(crate) struct StreamingOrdered<T> {
+    pool: ThreadPool,
+    sender: mpsc::Sender<StreamingMessage<T>>,
+    receiver: mpsc::Receiver<StreamingMessage<T>>,
+    ready: HashMap<usize, (usize, std::thread::Result<T>)>,
+    next_submit: usize,
+    next_take: usize,
+    reserved: usize,
+    active: usize,
+    max_active: usize,
+    memory_limit: usize,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl<T: Send + 'static> StreamingOrdered<T> {
+    pub fn new(threads: usize, memory_limit: usize, thread_name: &'static str) -> Result<Self> {
+        let max_active = threads.max(1);
+        let pool = ThreadPoolBuilder::new()
+            .num_threads(max_active)
+            .thread_name(move |index| format!("{thread_name}-{index}"))
+            .build()
+            .map_err(|error| Error::InvalidConfiguration(error.to_string()))?;
+        let (sender, receiver) = mpsc::channel();
+        Ok(Self {
+            pool,
+            sender,
+            receiver,
+            ready: HashMap::new(),
+            next_submit: 0,
+            next_take: 0,
+            reserved: 0,
+            active: 0,
+            max_active,
+            memory_limit,
+            cancelled: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    pub fn can_submit(&self, reservation: usize) -> bool {
+        self.active < self.max_active && reservation <= self.memory_limit.saturating_sub(self.reserved)
+    }
+
+    pub fn submit(&mut self, reservation: usize, job: impl FnOnce() -> T + Send + 'static) -> Result<()> {
+        if reservation > self.memory_limit {
+            return Err(Error::InvalidConfiguration("a streaming job reservation exceeds the memory limit".into()));
+        }
+        if !self.can_submit(reservation) {
+            return Err(Error::InvalidConfiguration("streaming pipeline is full".into()));
+        }
+        let key = self.next_submit;
+        self.next_submit += 1;
+        self.active += 1;
+        self.reserved += reservation;
+        let sender = self.sender.clone();
+        let cancelled = Arc::clone(&self.cancelled);
+        self.pool.spawn(move || {
+            if cancelled.load(Ordering::Relaxed) {
+                return;
+            }
+            let result = catch_unwind(AssertUnwindSafe(job));
+            let _ = sender.send((key, reservation, result));
+        });
+        Ok(())
+    }
+
+    pub fn take_next(&mut self) -> Result<T> {
+        if self.next_take >= self.next_submit {
+            return Err(Error::InvalidConfiguration("streaming pipeline has no pending result".into()));
+        }
+        while !self.ready.contains_key(&self.next_take) {
+            let message = self.receiver.recv().map_err(|_| Error::InvalidConfiguration("streaming worker stopped early".into()))?;
+            self.ready.insert(message.0, (message.1, message.2));
+        }
+        let (reservation, result) = self.ready.remove(&self.next_take).unwrap();
+        self.next_take += 1;
+        self.active -= 1;
+        self.reserved -= reservation;
+        result.map_err(|_| Error::InvalidConfiguration("streaming worker panicked".into()))
+    }
+
+    pub fn has_pending(&self) -> bool {
+        self.next_take < self.next_submit
+    }
+}
+
+impl<T> Drop for StreamingOrdered<T> {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
 }

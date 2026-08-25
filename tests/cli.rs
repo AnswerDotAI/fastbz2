@@ -11,7 +11,6 @@ use flate2::{Compression, write::GzEncoder};
 use lz4_flex::frame::{BlockMode as Lz4BlockMode, BlockSize as Lz4BlockSize, FrameEncoder as Lz4Encoder, FrameInfo as Lz4FrameInfo};
 use zip::{CompressionMethod as ZipCompression, ZipArchive, ZipWriter, write::FullFileOptions};
 
-#[allow(dead_code)]
 mod support;
 use support::{ZipMethod, zip_bytes, zip_with_modes};
 
@@ -85,6 +84,144 @@ fn write_tgz(path: &Path, entries: &[(&str, &[u8])]) {
     write_gzip(path, &tar_bytes(entries));
 }
 
+#[test]
+fn gzip_compression_infers_format_and_interoperates() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("sample.txt");
+    let output = directory.path().join("sample.txt.gz");
+    let plain = support::patterned_bytes(2_000_000);
+    fs::write(&input, &plain).unwrap();
+
+    let compressed = binary().args(["-z", input.to_str().unwrap(), "-o", output.to_str().unwrap(), "-P", "3"]).output().unwrap();
+    assert!(compressed.status.success(), "{}", String::from_utf8_lossy(&compressed.stderr));
+    assert!(Command::new("gzip").args(["-t", output.to_str().unwrap()]).status().unwrap().success());
+
+    let decoded = binary().args([output.to_str().unwrap(), "-o", "-"]).output().unwrap();
+    assert!(decoded.status.success());
+    assert_eq!(decoded.stdout, plain);
+
+    let missing_format = binary().args(["-z", input.to_str().unwrap()]).output().unwrap();
+    assert_eq!(missing_format.status.code(), Some(2));
+}
+
+#[test]
+fn gzip_compression_supports_stdin_stdout_and_default_names() {
+    let plain = b"stream compression through the public CLI".repeat(10_000);
+    let mut child = binary().args(["-z", "--format", "gzip", "-", "-o", "-"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    child.stdin.take().unwrap().write_all(&plain).unwrap();
+    let compressed = child.wait_with_output().unwrap();
+    assert!(compressed.status.success());
+    assert_eq!(fbz::gzip::decompress(&compressed.stdout).unwrap(), plain);
+
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("named");
+    fs::write(&input, &plain).unwrap();
+    let result = binary().args(["-z", "--format", "gzip", input.to_str().unwrap()]).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert!(directory.path().join("named.gz").exists());
+
+    let removed = directory.path().join("removed-after-stdout");
+    fs::write(&removed, &plain).unwrap();
+    let result = binary().args(["-z", "--format", "gzip", "--rm", removed.to_str().unwrap(), "-o", "-"]).output().unwrap();
+    assert!(result.status.success());
+    assert_eq!(fbz::gzip::decompress(&result.stdout).unwrap(), plain);
+    assert!(!removed.exists());
+}
+
+#[test]
+fn tar_gzip_compression_streams_multiple_inputs() {
+    let directory = tempfile::tempdir().unwrap();
+    let first = directory.path().join("first.txt");
+    let tree = directory.path().join("tree");
+    fs::create_dir(&tree).unwrap();
+    fs::write(&first, b"first contents").unwrap();
+    fs::write(tree.join("second.txt"), b"second contents").unwrap();
+    let archive = directory.path().join("bundle.tar.gz");
+
+    let packed = binary().args(["-z", first.to_str().unwrap(), tree.to_str().unwrap(), "-o", archive.to_str().unwrap(), "-P", "3"]).output().unwrap();
+    assert!(packed.status.success(), "{}", String::from_utf8_lossy(&packed.stderr));
+    assert!(Command::new("gzip").args(["-t", archive.to_str().unwrap()]).status().unwrap().success());
+    let skipped = binary().args(["-z", "--skip-existing", first.to_str().unwrap(), tree.to_str().unwrap(), "-o", archive.to_str().unwrap()]).output().unwrap();
+    assert!(skipped.status.success());
+
+    let destination = directory.path().join("unpacked");
+    let unpacked = binary().args([archive.to_str().unwrap(), "-C", destination.to_str().unwrap()]).output().unwrap();
+    assert!(unpacked.status.success(), "{}", String::from_utf8_lossy(&unpacked.stderr));
+    assert_eq!(fs::read(destination.join("first.txt")).unwrap(), b"first contents");
+    assert_eq!(fs::read(destination.join("tree/second.txt")).unwrap(), b"second contents");
+}
+
+#[test]
+fn zip_compression_reuses_fbz_deflate_and_extracts_safely() {
+    let directory = tempfile::tempdir().unwrap();
+    let first = directory.path().join("first.txt");
+    let tree = directory.path().join("tree");
+    fs::create_dir(&tree).unwrap();
+    fs::write(&first, b"first zip contents").unwrap();
+    fs::write(tree.join("second.txt"), b"second zip contents".repeat(20_000)).unwrap();
+    let archive = directory.path().join("bundle.zip");
+
+    let packed = binary().args(["-z", first.to_str().unwrap(), tree.to_str().unwrap(), "-o", archive.to_str().unwrap(), "-P", "3"]).output().unwrap();
+    assert!(packed.status.success(), "{}", String::from_utf8_lossy(&packed.stderr));
+    assert!(Command::new("unzip").args(["-t", archive.to_str().unwrap()]).status().unwrap().success());
+    let skipped = binary().args(["-z", "--skip-existing", first.to_str().unwrap(), tree.to_str().unwrap(), "-o", archive.to_str().unwrap()]).output().unwrap();
+    assert!(skipped.status.success());
+
+    let destination = directory.path().join("unzipped");
+    let unpacked = binary().args([archive.to_str().unwrap(), "-C", destination.to_str().unwrap()]).output().unwrap();
+    assert!(unpacked.status.success(), "{}", String::from_utf8_lossy(&unpacked.stderr));
+    assert_eq!(fs::read(destination.join("first.txt")).unwrap(), b"first zip contents");
+    assert_eq!(fs::read(destination.join("tree/second.txt")).unwrap(), b"second zip contents".repeat(20_000));
+}
+
+#[test]
+fn lz4_compression_and_tar_composition_interoperate() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("sample.txt");
+    let frame = directory.path().join("sample.txt.lz4");
+    let plain = b"LZ4 compression contents".repeat(10_000);
+    fs::write(&input, &plain).unwrap();
+
+    let compressed = binary().args(["-z", input.to_str().unwrap(), "-o", frame.to_str().unwrap(), "-P", "3"]).output().unwrap();
+    assert!(compressed.status.success(), "{}", String::from_utf8_lossy(&compressed.stderr));
+    assert!(Command::new("lz4").args(["-t", frame.to_str().unwrap()]).status().unwrap().success());
+    let decoded = binary().args([frame.to_str().unwrap(), "-o", "-"]).output().unwrap();
+    assert!(decoded.status.success());
+    assert_eq!(decoded.stdout, plain);
+
+    let archive = directory.path().join("bundle.tar.lz4");
+    let packed = binary().args(["-z", input.to_str().unwrap(), "-o", archive.to_str().unwrap(), "-P", "3"]).output().unwrap();
+    assert!(packed.status.success(), "{}", String::from_utf8_lossy(&packed.stderr));
+    let destination = directory.path().join("unpacked-lz4");
+    let unpacked = binary().args([archive.to_str().unwrap(), "-C", destination.to_str().unwrap()]).output().unwrap();
+    assert!(unpacked.status.success(), "{}", String::from_utf8_lossy(&unpacked.stderr));
+    assert_eq!(fs::read(destination.join("sample.txt")).unwrap(), plain);
+}
+
+#[test]
+fn bzip2_compression_and_tar_composition_interoperate() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("sample.txt");
+    let stream = directory.path().join("sample.txt.bz2");
+    let plain = b"bzip2 compression contents".repeat(10_000);
+    fs::write(&input, &plain).unwrap();
+
+    let compressed = binary().args(["-z", input.to_str().unwrap(), "-o", stream.to_str().unwrap(), "-P", "3"]).output().unwrap();
+    assert!(compressed.status.success(), "{}", String::from_utf8_lossy(&compressed.stderr));
+    assert!(Command::new("bzip2").args(["-t", stream.to_str().unwrap()]).status().unwrap().success());
+    let decoded = binary().args([stream.to_str().unwrap(), "-o", "-"]).output().unwrap();
+    assert!(decoded.status.success());
+    assert_eq!(decoded.stdout, plain);
+
+    let archive = directory.path().join("bundle.tar.bz2");
+    let packed = binary().args(["-z", input.to_str().unwrap(), "-o", archive.to_str().unwrap(), "-P", "3"]).output().unwrap();
+    assert!(packed.status.success(), "{}", String::from_utf8_lossy(&packed.stderr));
+    let destination = directory.path().join("unpacked-bzip2");
+    let unpacked = binary().args([archive.to_str().unwrap(), "-C", destination.to_str().unwrap()]).output().unwrap();
+    assert!(unpacked.status.success(), "{}", String::from_utf8_lossy(&unpacked.stderr));
+    assert_eq!(fs::read(destination.join("sample.txt")).unwrap(), plain);
+}
+
 fn traversal_tar() -> Vec<u8> {
     let contents = b"must stay inside destination";
     let mut header = tar::Header::new_gnu();
@@ -138,7 +275,7 @@ fn decode_test_index_and_list() {
     let input = directory.path().join("sample.bz2");
     let output = directory.path().join("sample");
     let index = directory.path().join("sample.fbz2i");
-    let plain: Vec<_> = (0..250_000).map(|i| ((i * 31 + i / 97) & 255) as u8).collect();
+    let plain = support::patterned_bytes(250_000);
     write_compressed(&input, &plain);
 
     let decoded = binary().args([input.to_str().unwrap(), "-P", "2"]).status().unwrap();
@@ -318,7 +455,7 @@ fn gzip_extension_selects_decoder_across_cli_modes() {
     let directory = tempfile::tempdir().unwrap();
     let input = directory.path().join("sample.gz");
     let output = directory.path().join("sample");
-    let plain: Vec<_> = (0..250_000).map(|i| ((i * 31 + i / 97) & 255) as u8).collect();
+    let plain = support::patterned_bytes(250_000);
     write_gzip(&input, &plain);
 
     let decoded = binary().arg(input.to_str().unwrap()).output().unwrap();
@@ -379,7 +516,7 @@ fn lz4_extension_magic_reporting_limits_and_corruption_work() {
     let directory = tempfile::tempdir().unwrap();
     let input = directory.path().join("sample.lz4");
     let output = directory.path().join("sample");
-    let plain: Vec<_> = (0..2_000_000).map(|i| ((i * 31 + i / 97) & 255) as u8).collect();
+    let plain = support::patterned_bytes(2_000_000);
     let encoded = lz4_bytes(&plain, Lz4BlockMode::Independent);
     fs::write(&input, &encoded).unwrap();
 

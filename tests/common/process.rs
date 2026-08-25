@@ -106,6 +106,7 @@ pub fn measure(command: &mut Command) -> io::Result<ProcessMetrics> {
     }
     // SAFETY: a successful `wait4` initialized the complete `rusage` value.
     let usage = unsafe { usage.assume_init() };
+    let wall = started.elapsed();
     let duration = |value: libc::timeval| Duration::new(value.tv_sec as u64, (value.tv_usec as u32) * 1_000);
     #[cfg(target_os = "macos")]
     let peak_rss_bytes = usage.ru_maxrss as u64;
@@ -115,7 +116,7 @@ pub fn measure(command: &mut Command) -> io::Result<ProcessMetrics> {
     let peak_phys_footprint_bytes = sampler.worker.join().unwrap_or(None);
     Ok(ProcessMetrics {
         status: ExitStatus::from_raw(status),
-        wall: started.elapsed(),
+        wall,
         user: duration(usage.ru_utime),
         system: duration(usage.ru_stime),
         peak_rss_bytes,

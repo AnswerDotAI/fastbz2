@@ -4,11 +4,11 @@ version = "0.1.9"
 edition = "2024"
 rust-version = "1.91"
 license = "Apache-2.0"
-description = "Compression-format research workbench with fast bzip2, gzip, LZ4, and ZIP decompression"
+description = "Fast parallel compression and decompression for bzip2, gzip, LZ4, tar, and ZIP"
 repository = "https://github.com/AnswerDotAI/fbz"
 homepage = "https://github.com/AnswerDotAI/fbz"
 documentation = "https://docs.rs/fbz"
-include = ["/src/**", "/Cargo.toml", "/README.md", "/LICENSE"]
+include = ["/src/**", "/Cargo.toml", "/README.md", "/DEV.md", "/LICENSE"]
 
 [lib]
 name = "fbz"

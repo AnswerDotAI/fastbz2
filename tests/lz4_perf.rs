@@ -1,6 +1,5 @@
 #[allow(dead_code, unused_imports)]
 mod common;
-#[allow(dead_code)]
 mod support;
 
 use std::{fs, hint::black_box, io::Write, path::PathBuf, process::Command, time::Instant};
