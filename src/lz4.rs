@@ -2,7 +2,7 @@
 
 use std::{hash::Hasher, io::Write};
 
-use rayon::ThreadPoolBuilder;
+use rayon::{ThreadPool, ThreadPoolBuilder};
 use twox_hash::XxHash32;
 
 use crate::history::extend_match;
@@ -17,6 +17,7 @@ const UNCOMPRESSED_BIT: u32 = 1 << 31;
 const WINDOW_SIZE: usize = 64 * 1024;
 const MIN_PARALLEL_INPUT: usize = 1024 * 1024;
 const AUTO_THREAD_LIMIT: usize = 4;
+const MAX_BATCH_BLOCKS: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BlockMode {
@@ -66,20 +67,22 @@ struct BlockLayout {
 }
 
 #[derive(Clone, Debug)]
-struct FrameLayout {
+struct FrameHeader {
     source_start: usize,
-    source_end: usize,
+    blocks_start: usize,
     max_block_size: usize,
     mode: BlockMode,
     block_checksums: bool,
     content_checksum: bool,
     content_size: Option<u64>,
-    expected_content_checksum: Option<u32>,
-    blocks: Vec<BlockLayout>,
 }
 
 fn invalid(message: impl Into<String>) -> Error {
     Error::InvalidLz4(message.into())
+}
+
+fn check_output(output: &impl OutputSink) -> Result<()> {
+    if output.is_cancelled() { Err(Error::Io(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "output reader stopped reading"))) } else { Ok(()) }
 }
 
 fn worker_threads(options: DecodeOptions) -> usize {
@@ -98,7 +101,7 @@ fn xxhash32(data: &[u8]) -> u32 {
     hasher.finish() as u32
 }
 
-fn parse_frame(data: &[u8], start: usize) -> Result<FrameLayout> {
+fn parse_frame_header(data: &[u8], start: usize) -> Result<FrameHeader> {
     let flg = *data.get(start + 4).ok_or_else(|| invalid("truncated frame descriptor"))?;
     let bd = *data.get(start + 5).ok_or_else(|| invalid("truncated frame descriptor"))?;
     if flg & 0xc0 != 0x40 {
@@ -138,78 +141,40 @@ fn parse_frame(data: &[u8], start: usize) -> Result<FrameLayout> {
         return Err(invalid(format!("header checksum mismatch: expected {expected_header_checksum:02x}, decoded {header_checksum:02x}")));
     }
     position += 1;
-    let mut blocks = Vec::new();
-    loop {
-        let value = read_u32(data, position, "block header")?;
-        position += 4;
-        if value == 0 {
-            break;
-        }
-        let stored = value & UNCOMPRESSED_BIT != 0;
-        let size = (value & !UNCOMPRESSED_BIT) as usize;
-        if size == 0 || size > max_block_size {
-            return Err(invalid(format!("block at byte {} has invalid size {size} for {max_block_size}-byte frames", position - 4)));
-        }
-        let data_start = position;
-        let data_end = position.checked_add(size).filter(|&end| end <= data.len()).ok_or_else(|| invalid("block data exceeds the frame"))?;
-        position = data_end;
-        let expected_checksum = if block_checksums {
-            let checksum = read_u32(data, position, "block checksum")?;
-            position += 4;
-            Some(checksum)
-        } else {
-            None
-        };
-        blocks.push(BlockLayout { data_start, data_end, stored, expected_checksum });
+    Ok(FrameHeader { source_start: start, blocks_start: position, max_block_size, mode, block_checksums, content_checksum, content_size })
+}
+
+fn next_block(data: &[u8], position: &mut usize, frame: &FrameHeader) -> Result<Option<BlockLayout>> {
+    let value = read_u32(data, *position, "block header")?;
+    *position += 4;
+    if value == 0 {
+        return Ok(None);
     }
-    let expected_content_checksum = if content_checksum {
-        let checksum = read_u32(data, position, "content checksum")?;
-        position += 4;
+    let stored = value & UNCOMPRESSED_BIT != 0;
+    let size = (value & !UNCOMPRESSED_BIT) as usize;
+    if size == 0 || size > frame.max_block_size {
+        return Err(invalid(format!("block at byte {} has invalid size {size} for {}-byte frames", *position - 4, frame.max_block_size)));
+    }
+    let data_start = *position;
+    let data_end = position.checked_add(size).filter(|&end| end <= data.len()).ok_or_else(|| invalid("block data exceeds the frame"))?;
+    *position = data_end;
+    let expected_checksum = if frame.block_checksums {
+        let checksum = read_u32(data, *position, "block checksum")?;
+        *position += 4;
         Some(checksum)
     } else {
         None
     };
-    Ok(FrameLayout {
-        source_start: start,
-        source_end: position,
-        max_block_size,
-        mode,
-        block_checksums,
-        content_checksum,
-        content_size,
-        expected_content_checksum,
-        blocks,
-    })
+    Ok(Some(BlockLayout { data_start, data_end, stored, expected_checksum }))
 }
 
-fn parse(data: &[u8]) -> Result<Vec<FrameLayout>> {
-    let mut frames = Vec::new();
-    let mut position = 0;
-    while position < data.len() {
-        let magic = read_u32(data, position, "frame magic")?;
-        if (SKIPPABLE_MAGIC_START..=SKIPPABLE_MAGIC_END).contains(&magic) {
-            let length = read_u32(data, position + 4, "skippable-frame length")? as usize;
-            position = position
-                .checked_add(8)
-                .and_then(|value| value.checked_add(length))
-                .filter(|&end| end <= data.len())
-                .ok_or_else(|| invalid("skippable frame exceeds the input"))?;
-            continue;
-        }
-        if magic == LEGACY_MAGIC {
-            return Err(invalid("legacy LZ4 frames are not supported"));
-        }
-        if magic != FRAME_MAGIC {
-            return Err(invalid(format!("wrong magic {magic:08x} at byte {position}")));
-        }
-        let frame = parse_frame(data, position)?;
-        position = frame.source_end;
-        frames.push(frame);
-    }
-    if frames.is_empty() {
-        return Err(invalid("input contains no LZ4 frames"));
-    }
-    Ok(frames)
+fn skip_frame(data: &[u8], position: usize) -> Result<usize> {
+    let length = read_u32(data, position + 4, "skippable-frame length")? as usize;
+    position
+        .checked_add(8)
+        .and_then(|value| value.checked_add(length))
+        .filter(|&end| end <= data.len())
+        .ok_or_else(|| invalid("skippable frame exceeds the input"))
 }
 
 fn read_length(input: &[u8], position: &mut usize, initial: usize) -> Result<usize> {
@@ -346,42 +311,100 @@ impl<S: OutputSink, P: FnMut(DecodeProgress)> FrameCommitter<'_, S, P> {
 
 fn decode_independent<S: OutputSink, P: FnMut(DecodeProgress)>(
     data: &[u8],
-    frame: &FrameLayout,
+    frame: &FrameHeader,
+    position: &mut usize,
     options: DecodeOptions,
+    pool: &mut Option<ThreadPool>,
     committer: &mut FrameCommitter<'_, S, P>,
 ) -> Result<()> {
     let threads = worker_threads(options);
-    let source_bytes = frame.source_end - frame.source_start;
-    let parallel_work = frame.blocks.iter().any(|block| !block.stored || block.expected_checksum.is_some());
-    if threads == 1 || frame.blocks.len() < 2 || source_bytes < MIN_PARALLEL_INPUT || !parallel_work {
-        for block in &frame.blocks {
-            let decoded = decode_layout_block(data, block, &[], frame.max_block_size)?;
-            committer.commit(block, decoded)?;
+    let parallel_slots = options.memory_limit / frame.max_block_size;
+    if threads == 1 || parallel_slots < 2 {
+        loop {
+            check_output(committer.output)?;
+            let Some(block) = next_block(data, position, frame)? else { break };
+            let decoded = decode_layout_block(data, &block, &[], frame.max_block_size)?;
+            committer.commit(&block, decoded)?;
         }
         return Ok(());
     }
-    let jobs: Vec<_> = frame
-        .blocks
-        .iter()
-        .cloned()
-        .enumerate()
-        .map(|(key, block)| Job { key, reservation: if block.stored { 0 } else { frame.max_block_size }, payload: block })
-        .collect();
-    let pool =
-        ThreadPoolBuilder::new().num_threads(threads).thread_name(|index| format!("fbz-lz4-{index}")).build().map_err(|error| invalid(error.to_string()))?;
-    run_ordered(
-        &pool,
-        &jobs,
-        PipelineLimits { memory: options.memory_limit, active: threads.saturating_add(2) },
-        |block| decode_layout_block(data, block, &[], frame.max_block_size),
-        |result| result.as_ref().map_or(0, DecodedBlock::retained_bytes),
-        |results| {
-            for (key, block) in frame.blocks.iter().enumerate() {
-                committer.commit(block, results.take(key)??)?;
+
+    let mut ended = false;
+    while !ended {
+        check_output(committer.output)?;
+        let mut batch = Vec::new();
+        let mut estimated_work = 0_usize;
+        let mut parse_error = None;
+        while batch.len() < MAX_BATCH_BLOCKS && (batch.len() < threads || estimated_work < MIN_PARALLEL_INPUT) {
+            match next_block(data, position, frame) {
+                Ok(Some(block)) => {
+                    estimated_work = estimated_work.saturating_add(if block.stored {
+                        if block.expected_checksum.is_some() { block.data_end - block.data_start } else { 0 }
+                    } else {
+                        frame.max_block_size
+                    });
+                    batch.push(block);
+                }
+                Ok(None) => {
+                    ended = true;
+                    break;
+                }
+                Err(error) => {
+                    parse_error = Some(error);
+                    ended = true;
+                    break;
+                }
             }
-            Ok(())
-        },
-    )
+        }
+        if batch.is_empty() {
+            return match parse_error {
+                Some(error) => Err(error),
+                None => Ok(()),
+            };
+        }
+        let parallel_work =
+            batch.len() >= 2 && estimated_work >= MIN_PARALLEL_INPUT && batch.iter().any(|block| !block.stored || block.expected_checksum.is_some());
+        if !parallel_work {
+            for block in batch {
+                let decoded = decode_layout_block(data, &block, &[], frame.max_block_size)?;
+                committer.commit(&block, decoded)?;
+            }
+        } else {
+            if pool.is_none() {
+                *pool = Some(
+                    ThreadPoolBuilder::new()
+                        .num_threads(threads)
+                        .thread_name(|index| format!("fbz-lz4-{index}"))
+                        .build()
+                        .map_err(|error| invalid(error.to_string()))?,
+                );
+            }
+            let pool = pool.as_ref().unwrap();
+            let jobs: Vec<_> = batch
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(key, block)| Job { key, reservation: if block.stored { 0 } else { frame.max_block_size }, payload: block })
+                .collect();
+            run_ordered(
+                pool,
+                &jobs,
+                PipelineLimits { memory: options.memory_limit, active: threads.saturating_add(2) },
+                |block| decode_layout_block(data, block, &[], frame.max_block_size),
+                |result| result.as_ref().map_or(0, DecodedBlock::retained_bytes),
+                |results| {
+                    for (key, block) in batch.iter().enumerate() {
+                        committer.commit(block, results.take(key)??)?;
+                    }
+                    Ok(())
+                },
+            )?;
+        }
+        if let Some(error) = parse_error {
+            return Err(error);
+        }
+    }
+    Ok(())
 }
 
 fn update_history(history: &mut Vec<u8>, bytes: &[u8]) {
@@ -397,12 +420,19 @@ fn update_history(history: &mut Vec<u8>, bytes: &[u8]) {
     history.extend_from_slice(bytes);
 }
 
-fn decode_linked<S: OutputSink, P: FnMut(DecodeProgress)>(data: &[u8], frame: &FrameLayout, committer: &mut FrameCommitter<'_, S, P>) -> Result<()> {
+fn decode_linked<S: OutputSink, P: FnMut(DecodeProgress)>(
+    data: &[u8],
+    frame: &FrameHeader,
+    position: &mut usize,
+    committer: &mut FrameCommitter<'_, S, P>,
+) -> Result<()> {
     let mut history = Vec::with_capacity(WINDOW_SIZE);
-    for block in &frame.blocks {
-        let decoded = decode_layout_block(data, block, &history, frame.max_block_size)?;
+    loop {
+        check_output(committer.output)?;
+        let Some(block) = next_block(data, position, frame)? else { break };
+        let decoded = decode_layout_block(data, &block, &history, frame.max_block_size)?;
         update_history(&mut history, decoded.bytes(data));
-        committer.commit(block, decoded)?;
+        committer.commit(&block, decoded)?;
     }
     Ok(())
 }
@@ -447,53 +477,76 @@ pub fn decompress_to_sink_with_options_and_progress<S: OutputSink, P: FnMut(Deco
     mut progress: P,
 ) -> Result<Report> {
     let options = options.validate()?;
-    let layouts = parse(data)?;
-    let mut frames = Vec::with_capacity(layouts.len());
+    let mut frames = Vec::new();
     let mut blocks = Vec::new();
     let mut decoded_total = 0_u64;
-    for (frame_number, layout) in layouts.iter().enumerate() {
+    let mut position = 0_usize;
+    let mut pool = None;
+    while position < data.len() {
+        check_output(output)?;
+        let magic = read_u32(data, position, "frame magic")?;
+        if (SKIPPABLE_MAGIC_START..=SKIPPABLE_MAGIC_END).contains(&magic) {
+            position = skip_frame(data, position)?;
+            continue;
+        }
+        if magic == LEGACY_MAGIC {
+            return Err(invalid("legacy LZ4 frames are not supported"));
+        }
+        if magic != FRAME_MAGIC {
+            return Err(invalid(format!("wrong magic {magic:08x} at byte {position}")));
+        }
+        let frame_number = frames.len();
+        let frame = parse_frame_header(data, position)?;
+        position = frame.blocks_start;
         let first_block = blocks.len();
-        let mut committer = FrameCommitter {
-            data,
-            output,
-            progress: &mut progress,
-            hasher: layout.content_checksum.then(|| XxHash32::with_seed(0)),
-            decoded_base: decoded_total,
-            decoded: 0,
-            frame_number: u32::try_from(frame_number).map_err(|_| invalid("too many frames"))?,
-            blocks: &mut blocks,
-        };
-        match layout.mode {
-            BlockMode::Independent => decode_independent(data, layout, options, &mut committer)?,
-            BlockMode::Linked => decode_linked(data, layout, &mut committer)?,
-        }
-        if let Some(expected) = layout.content_size
-            && committer.decoded != expected
-        {
-            return Err(invalid(format!("content size mismatch: expected {expected}, decoded {}", committer.decoded)));
-        }
-        if let Some(expected) = layout.expected_content_checksum {
-            let actual = committer.hasher.take().unwrap().finish() as u32;
-            if actual != expected {
-                return Err(invalid(format!("content checksum mismatch: expected {expected:08x}, decoded {actual:08x}")));
+        let decoded_len = {
+            let mut committer = FrameCommitter {
+                data,
+                output,
+                progress: &mut progress,
+                hasher: frame.content_checksum.then(|| XxHash32::with_seed(0)),
+                decoded_base: decoded_total,
+                decoded: 0,
+                frame_number: u32::try_from(frame_number).map_err(|_| invalid("too many frames"))?,
+                blocks: &mut blocks,
+            };
+            match frame.mode {
+                BlockMode::Independent => decode_independent(data, &frame, &mut position, options, &mut pool, &mut committer)?,
+                BlockMode::Linked => decode_linked(data, &frame, &mut position, &mut committer)?,
             }
-        }
-        let decoded_len = committer.decoded;
+            if let Some(expected) = frame.content_size
+                && committer.decoded != expected
+            {
+                return Err(invalid(format!("content size mismatch: expected {expected}, decoded {}", committer.decoded)));
+            }
+            if frame.content_checksum {
+                let expected = read_u32(data, position, "content checksum")?;
+                position += 4;
+                let actual = committer.hasher.take().unwrap().finish() as u32;
+                if actual != expected {
+                    return Err(invalid(format!("content checksum mismatch: expected {expected:08x}, decoded {actual:08x}")));
+                }
+            }
+            committer.decoded
+        };
         decoded_total = decoded_total.checked_add(decoded_len).ok_or_else(|| invalid("decoded length overflows u64"))?;
         frames.push(Frame {
-            compressed_start: layout.source_start as u64,
-            compressed_end: layout.source_end as u64,
+            compressed_start: frame.source_start as u64,
+            compressed_end: position as u64,
             decoded_start: decoded_total - decoded_len,
             decoded_len,
-            block_max_size: layout.max_block_size as u32,
-            block_mode: layout.mode,
-            block_checksums: layout.block_checksums,
-            content_checksum: layout.content_checksum,
-            declared_content_size: layout.content_size,
+            block_max_size: frame.max_block_size as u32,
+            block_mode: frame.mode,
+            block_checksums: frame.block_checksums,
+            content_checksum: frame.content_checksum,
+            declared_content_size: frame.content_size,
             first_block,
             block_count: blocks.len() - first_block,
         });
-        progress(DecodeProgress { compressed_bytes: layout.source_end as u64, decoded_bytes: decoded_total });
+        progress(DecodeProgress { compressed_bytes: position as u64, decoded_bytes: decoded_total });
+    }
+    if frames.is_empty() {
+        return Err(invalid("input contains no LZ4 frames"));
     }
     output.flush()?;
     progress(DecodeProgress { compressed_bytes: data.len() as u64, decoded_bytes: decoded_total });

@@ -159,7 +159,7 @@ It accepts standard independent or linked blocks, stored blocks, all four standa
 
 ### Streaming reads
 
-`fbz::Reader` provides a normal `std::io::Read` over bzip2 or gzip files without a preliminary indexing or validation pass:
+`fbz::Reader` provides a normal `std::io::Read` over bzip2, gzip, or LZ4 files without a preliminary indexing or validation pass:
 
 ```rust
 use std::io::{BufReader, Read};
@@ -176,7 +176,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Magic takes priority over the filename extension, with the extension used as a fallback for damaged headers. The decoder runs on an owned worker thread and transfers completed decoder allocations through a zero-capacity pipe; it neither materializes the plaintext nor writes an intermediate file. `DecodeOptions` controls decoder threads and speculative memory. Dropping early disconnects the pipe, cancels outstanding work, and joins the worker.
 
-Checksum errors discovered after output has begun are returned by a later `read()` call. Therefore only successful EOF establishes that the complete stream was valid; dropping early deliberately does not finish validation. Compressed tar inputs yield the decoded tar byte stream rather than extracting it. LZ4 and ZIP are not currently exposed through `Reader`: LZ4's frame-layout pass must first become incremental, while ZIP has no single decoded byte stream.
+Checksum errors discovered after output has begun are returned by a later `read()` call. Therefore only successful EOF establishes that the complete stream was valid; dropping early deliberately does not finish validation. Compressed tar inputs yield the decoded tar byte stream rather than extracting it. ZIP is not exposed through `Reader` because an archive has no single decoded byte stream.
 
 ## Performance
 
@@ -212,8 +212,8 @@ The same 80.5 MiB prefix in a standard independent-block LZ4 frame (`40.2 MiB` c
 
 | CLI | Milliseconds | Peak RSS | fbz/reference |
 |---|---:|---:|---:|
-| fbz, auto (4 workers) | 51.188 | 71.0 MiB | 0.944x |
-| Homebrew `lz4` 1.10.0 | 54.228 | 32.0 MiB | — |
+| fbz, auto (4 workers) | 55.313 | 58.9 MiB | 0.996x |
+| Homebrew `lz4` 1.10.0 | 55.537 | 32.0 MiB | — |
 
 The larger fbz RSS includes its memory-mapped 40.2 MiB source plus bounded in-flight decoded blocks; it does not grow with decoded file size. Testing higher worker counts showed no meaningful throughput gain and raised RSS, so automatic LZ4 decoding stops at four workers; `-P` remains an explicit override.
 
@@ -223,7 +223,7 @@ Homebrew `pbzip2` 1.1.13 could not safely decompress the complete 26,668,484,995
 
 The production codec logic is portable Rust. The bzip2 decoder uses a tuned 4096-entry Huffman lookup table for codes up to 12 bits and canonical fallback for longer codes. A structural scan finds possible non-byte-aligned block markers; these remain speculative until ordered decoding establishes the exact stream chain and validates all block and combined-stream CRCs. A rolling scheduler keeps workers busy across concatenated streams while bounding decoded results awaiting validation.
 
-The gzip backend implements RFC 1952 framing and DEFLATE directly in this repository. For sufficiently large dynamic-Huffman inputs it discovers independently decodable boundaries, decodes speculative chunks through the shared byte-budgeted scheduler, and represents unknown predecessor bytes as compact markers. The ordered coordinator resolves only the suffix needed to derive the next 32 KiB history window; full marker resolution and per-chunk CRC run as priority work on the same staged worker queue, and CRCs are combined in order. Once a chunk has a marker-free window, the same decoder switches its remaining output from `u16` markers to ordinary bytes. Small, stored-heavy, fixed-heavy, one-thread, and low-memory inputs use the serial path; concatenated members may independently choose either path. FHCRC, CRC32, and ISIZE are always validated. LZ4 framing and block decoding are likewise implemented in safe Rust. Independent blocks use the same ordered, byte-budgeted scheduler as bzip2; linked blocks retain only the preceding 64 KiB window. LZ4 and DEFLATE share one optimized overlapping back-reference expansion primitive. Header, block, and content XXH32 checksums are validated where present. ZIP reuses the raw DEFLATE core and uses the mature `zip` crate only for container structure and metadata. It supports stored and DEFLATE entries, Zip64, streaming data descriptors, Unix symlinks/modes, and Unix/NTFS modification-time fields; encryption and uncommon legacy compression methods are intentionally unsupported. `crc32fast` and `twox-hash` are the production checksum helpers; `flate2` and `lz4_flex` are dev-only differential oracles.
+The gzip backend implements RFC 1952 framing and DEFLATE directly in this repository. For sufficiently large dynamic-Huffman inputs it discovers independently decodable boundaries, decodes speculative chunks through the shared byte-budgeted scheduler, and represents unknown predecessor bytes as compact markers. The ordered coordinator resolves only the suffix needed to derive the next 32 KiB history window; full marker resolution and per-chunk CRC run as priority work on the same staged worker queue, and CRCs are combined in order. Once a chunk has a marker-free window, the same decoder switches its remaining output from `u16` markers to ordinary bytes. Small, stored-heavy, fixed-heavy, one-thread, and low-memory inputs use the serial path; concatenated members may independently choose either path. FHCRC, CRC32, and ISIZE are always validated. LZ4 framing and block decoding are likewise implemented in safe Rust. It parses one frame header at a time and schedules independent blocks in bounded batches, so output can begin without a whole-frame layout pass. Independent blocks use the same ordered, byte-budgeted scheduler as bzip2; linked blocks retain only the preceding 64 KiB window. LZ4 and DEFLATE share one optimized overlapping back-reference expansion primitive. Header, block, and content XXH32 checksums are validated where present. ZIP reuses the raw DEFLATE core and uses the mature `zip` crate only for container structure and metadata. It supports stored and DEFLATE entries, Zip64, streaming data descriptors, Unix symlinks/modes, and Unix/NTFS modification-time fields; encryption and uncommon legacy compression methods are intentionally unsupported. `crc32fast` and `twox-hash` are the production checksum helpers; `flate2` and `lz4_flex` are dev-only differential oracles.
 
 Legacy randomized blocks generated by bzip2 releases before 0.9.5 are intentionally unsupported. Normal `BZh1` through `BZh9` streams and concatenated streams are supported.
 

@@ -29,7 +29,7 @@ enum State {
     Failed(StoredError),
 }
 
-/// A streaming, parallel bzip2 or gzip decoder for file-backed streams.
+/// A streaming, parallel bzip2, gzip, or LZ4 decoder for file-backed streams.
 ///
 /// Successful EOF means the complete stream and its checksums were validated.
 /// A corrupt trailer can therefore produce decoded bytes before a later call to
@@ -43,7 +43,7 @@ pub struct Reader {
 }
 
 impl Reader {
-    /// Open a bzip2 or gzip file and start its decoder coordinator.
+    /// Open a bzip2, gzip, or LZ4 file and start its decoder coordinator.
     ///
     /// This opens and memory-maps only the compressed source. Format and option
     /// errors are returned here; compressed-data errors are returned later by
@@ -53,8 +53,8 @@ impl Reader {
         let path = path.as_ref();
         let source = Source::open(path)?;
         let format = Format::detect(path, source.as_slice())?;
-        if !matches!(format, Format::Bzip2 | Format::Gzip) {
-            return Err(Error::UnsupportedFormat("fbz::Reader currently supports bzip2 and gzip streams".into()));
+        if !matches!(format, Format::Bzip2 | Format::Gzip | Format::Lz4) {
+            return Err(Error::UnsupportedFormat("fbz::Reader supports bzip2, gzip, and LZ4 streams".into()));
         }
 
         let (mut output, pipe) = output_pipe();
