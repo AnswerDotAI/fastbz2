@@ -1,4 +1,4 @@
-import bz2, io
+import bz2, gzip, io
 from threading import Event, Thread
 
 import pytest
@@ -11,6 +11,13 @@ def patterned(size): return bytes((i * 37 + i // 251) & 255 for i in range(size)
 def test_decompress_matches_libbz2_at_every_level(level):
     plain = patterned(20_000)
     assert fbz.decompress(bz2.compress(plain, compresslevel=level), threads=2) == plain
+
+def test_compress_stream_formats_and_options():
+    plain = patterned(300_000)
+    assert bz2.decompress(fbz.compress(plain, "bzip2", threads=2, level=3)) == plain
+    assert gzip.decompress(fbz.compress(plain, "gzip", threads=2, level=6)) == plain
+    assert fbz.compress(plain, "lz4", threads=2)[:4] == b"\x04\x22\x4d\x18"
+    with pytest.raises(ValueError, match="format"): fbz.compress(plain, "zip")
 
 def test_parallel_multiblock_and_concatenated_are_deterministic():
     first, second = patterned(350_000), patterned(75_000)

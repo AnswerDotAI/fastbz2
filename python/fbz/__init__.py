@@ -2,7 +2,7 @@ from collections import namedtuple
 import io, os
 from pathlib import Path
 
-from ._core import BadBzip2File, _IndexedReader, __version__, _build_index, _decompress, _scan, _test, bz2_crc32
+from ._core import BadBzip2File, _IndexedReader, __version__, _build_index, _compress, _decompress, _scan, _test, bz2_crc32
 
 DEFAULT_MEMORY_LIMIT = 1024 * 1024 * 1024
 DEFAULT_CACHE_LIMIT = 64 * 1024 * 1024
@@ -27,6 +27,10 @@ def scan(data: bytes) -> ScanResult:
 def decompress(data: bytes, *, threads=0, memory_limit=DEFAULT_MEMORY_LIMIT) -> bytes:
     "Decompress and fully CRC-validate one or more concatenated bzip2 streams."
     return _decompress(data, threads, memory_limit)
+
+def compress(data: bytes, format: str, *, threads=0, memory_limit=DEFAULT_MEMORY_LIMIT, level=None) -> bytes:
+    "Compress *data* as bzip2, gzip, or LZ4."
+    return _compress(data, format, threads, memory_limit, level)
 
 class IndexedBzip2File(io.RawIOBase):
     "Seekable binary reader backed by a validated bzip2 block index."
@@ -96,5 +100,5 @@ def test(source, *, threads=0, memory_limit=DEFAULT_MEMORY_LIMIT):
 
 __all__ = [
     "__version__", "BadBzip2File", "BlockCandidate", "DEFAULT_CACHE_LIMIT", "DEFAULT_MEMORY_LIMIT", "EndCandidate",
-    "IndexedBzip2File", "ScanResult", "StreamHeaderCandidate", "build_index", "bz2_crc32", "decompress", "open", "scan", "test"
+    "IndexedBzip2File", "ScanResult", "StreamHeaderCandidate", "build_index", "bz2_crc32", "compress", "decompress", "open", "scan", "test"
 ]

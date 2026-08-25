@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::{fs, io::Write, path::Path};
 
 use fbz::{DecodeOptions, decompress};
@@ -16,6 +18,18 @@ pub(crate) fn simplewiki_prefix() -> Vec<u8> {
     let contents = decompress(&encoded, DecodeOptions::default()).unwrap();
     assert_eq!(contents.len(), 84_423_012);
     contents
+}
+
+pub(crate) fn patterned_bytes(size: usize) -> Vec<u8> {
+    patterned_bytes_with(size, 31, 97)
+}
+
+pub(crate) fn patterned_bytes_with(size: usize, stride: usize, period: usize) -> Vec<u8> {
+    (0..size).map(|index| ((index * stride + index / period) & 255) as u8).collect()
+}
+
+pub(crate) fn compression_inputs(greeting: &[u8], size: usize) -> Vec<Vec<u8>> {
+    vec![Vec::new(), greeting.to_vec(), vec![b'a'; size], patterned_bytes(size)]
 }
 
 fn push_u16(output: &mut Vec<u8>, value: u16) {

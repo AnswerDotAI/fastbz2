@@ -6,7 +6,7 @@ backend-path = ["."]
 [project]
 name = "fbz"
 dynamic = ["version"]
-description = "Compression-format research workbench with fast bzip2, gzip, LZ4, and ZIP decompression"
+description = "Fast parallel compression and decompression for bzip2, gzip, LZ4, tar, and ZIP"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.10"
 readme = "README.md"

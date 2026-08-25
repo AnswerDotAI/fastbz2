@@ -9,7 +9,6 @@ use crabz2::{Level, compress};
 use fbz::{DecodeOptions, OutputSink, gzip as gzip_decoder};
 use flate2::{Compression, write::GzEncoder};
 
-#[allow(dead_code)]
 mod support;
 use support::simplewiki_prefix;
 

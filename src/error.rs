@@ -85,3 +85,12 @@ impl From<io::Error> for Error {
         Self::Io(source)
     }
 }
+
+impl Error {
+    pub(crate) fn into_io(self) -> io::Error {
+        match self {
+            Self::Io(error) => error,
+            error => io::Error::other(error),
+        }
+    }
+}

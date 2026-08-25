@@ -1,5 +1,9 @@
+#[path = "fbz/archive_create.rs"]
+mod archive_create;
 #[path = "fbz/archive_extract.rs"]
 mod archive_extract;
+#[path = "fbz/tar_create.rs"]
+mod tar_create;
 #[path = "fbz/tar_extract.rs"]
 mod tar_extract;
 #[path = "fbz/zip_extract.rs"]
@@ -13,10 +17,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use clap::{ArgGroup, Parser};
+use clap::{ArgGroup, Parser, ValueEnum};
 use fbz::{
-    DecodeOptions, DecodeProgress, Error, Format, Index, OutputSink, Source, WriterSink, build_index_with_progress, decode_stream_to_sink_with_progress,
-    decode_to_writer_with_progress, gzip, lz4,
+    DecodeOptions, DecodeProgress, EncodeOptions, EncodeProgress, Error, Format, Index, OutputSink, Source, WriterSink, build_index_with_progress,
+    decode_stream_to_sink_with_progress, decode_to_writer_with_progress, gzip, lz4,
 };
 use serde_json::{Value, json};
 use tempfile::NamedTempFile;
@@ -24,8 +28,8 @@ use tempfile::NamedTempFile;
 #[derive(Parser)]
 #[command(
     version,
-    about = "Parallel bzip2, gzip, LZ4, and ZIP decompression with safe archive extraction",
-    long_about = "Parallel bzip2, gzip, and LZ4 frame decompression, streaming tar extraction, and adaptive parallel ZIP extraction. Decoding is the default operation. Recognised codec suffixes are removed from normal output names. ZIP and compressed tar archives extract automatically unless -o is given; -o is not valid for ZIP. Independent LZ4 blocks decode in parallel; linked blocks decode serially.",
+    about = "Fast parallel compression and decompression with safe archive handling",
+    long_about = "Parallel compression and decompression for bzip2, gzip, and LZ4, plus streaming compressed-tar and adaptive ZIP creation/extraction. Decoding is the default operation; -z enables compression. Compression format is inferred from the output suffix or selected with --format.",
     after_help = r#"Examples:
   fbz dump.xml.bz2              Write dump.xml
   fbz events.json.gz -o -       Write decoded bytes to stdout
@@ -33,12 +37,17 @@ use tempfile::NamedTempFile;
   fbz backup.tgz -C restored    Extract into restored/
   fbz backup.tar.lz4 -C restored Extract a tar-wrapped LZ4 frame
   fbz dataset.zip -C restored   Extract ZIP entries in parallel
+  fbz -z data -o data.bz2      Compress as parallel bzip2
+  fbz -z data -o data.gz       Compress as one standard gzip member
+  fbz -z data -o data.lz4      Compress as independent LZ4 blocks
+  fbz -z src -o src.tar.gz     Stream tar directly into gzip
+  fbz -z src -o src.zip        Create ZIP with adaptive parallelism
   fbz --test archive.tar.bz2    Validate without writing output
   fbz --list --json data.gz     Show the validated layout as JSON"#,
-    group(ArgGroup::new("mode").args(["test", "index", "list", "extract"]))
+    group(ArgGroup::new("mode").args(["test", "index", "list", "extract", "compress"]))
 )]
 struct Cli {
-    /// Input files, or - for stdin except with --index or --list.
+    /// Input files, or - where the selected operation accepts a byte stream.
     #[arg(required = true, num_args = 1..)]
     inputs: Vec<String>,
     /// Fully decode and validate checksums without writing output.
@@ -53,16 +62,25 @@ struct Cli {
     /// Extract a tar or ZIP archive; automatic for recognised archive suffixes.
     #[arg(short = 'x', long)]
     extract: bool,
-    /// Write decoded bytes to PATH, or - for stdout; requires one input and disables automatic extraction.
+    /// Compress rather than decompress.
+    #[arg(short = 'z', long)]
+    compress: bool,
+    /// Compression format; inferred from -o when possible.
+    #[arg(long, value_enum, requires = "compress")]
+    format: Option<CompressionFormat>,
+    /// Compression level from 1 (fastest) through 9 (smallest); format-specific default.
+    #[arg(short = 'l', long, requires = "compress")]
+    level: Option<u8>,
+    /// Write to PATH or stdout; tar and ZIP creation accept multiple inputs.
     #[arg(short, long, conflicts_with_all = ["test", "list", "extract", "output_dir"])]
     output: Option<PathBuf>,
-    /// Put decoded files or extracted archive entries in DIRECTORY.
+    /// Put generated files or extracted archive entries in DIRECTORY.
     #[arg(short = 'C', long = "output-dir", conflicts_with_all = ["test", "index", "list", "output"])]
     output_dir: Option<PathBuf>,
-    /// Decoder worker threads; 0 uses all available CPUs.
+    /// Compression or decompression workers; 0 selects automatically.
     #[arg(short = 'P', long, default_value_t = 0)]
     threads: usize,
-    /// Maximum speculative decoder output; accepts binary size suffixes.
+    /// Maximum in-flight codec memory budget; accepts binary size suffixes.
     #[arg(long, default_value = "1G", value_parser = parse_size)]
     memory_limit: usize,
     /// Maximum decoded bytes per input; accepts binary size suffixes.
@@ -71,10 +89,10 @@ struct Cli {
     /// Replace existing output files or archive entries.
     #[arg(short, long, conflicts_with_all = ["test", "list", "skip_existing"])]
     force: bool,
-    /// Skip existing decoded output files.
+    /// Skip existing output files; unavailable during extraction.
     #[arg(long, conflicts_with_all = ["test", "list", "extract", "force"])]
     skip_existing: bool,
-    /// Remove compressed inputs after successful decoding or extraction.
+    /// Remove inputs after standalone compression, decoding, or extraction; not archive creation.
     #[arg(long = "rm", conflicts_with_all = ["test", "index", "list"])]
     remove_input: bool,
     /// Suppress progress and skip notices.
@@ -83,6 +101,17 @@ struct Cli {
     /// Emit `--list` output as JSON.
     #[arg(long, requires = "list")]
     json: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum CompressionFormat {
+    Bzip2,
+    Gzip,
+    Lz4,
+    TarBzip2,
+    TarGzip,
+    TarLz4,
+    Zip,
 }
 
 fn main() -> ExitCode {
@@ -97,6 +126,9 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> fbz::Result<()> {
     validate_cli(&cli)?;
+    if cli.compress {
+        return run_compress(&cli);
+    }
     let options = DecodeOptions { threads: cli.threads, memory_limit: cli.memory_limit };
     if cli.test {
         for input in &cli.inputs {
@@ -114,10 +146,13 @@ fn run(cli: Cli) -> fbz::Result<()> {
 }
 
 fn validate_cli(cli: &Cli) -> fbz::Result<()> {
-    if cli.output.is_some() && cli.inputs.len() != 1 {
+    let selected_format = if cli.compress { Some(compression_format(cli)?) } else { None };
+    let archive_compression =
+        matches!(selected_format, Some(CompressionFormat::TarBzip2 | CompressionFormat::TarGzip | CompressionFormat::TarLz4 | CompressionFormat::Zip));
+    if cli.output.is_some() && cli.inputs.len() != 1 && !archive_compression {
         return Err(invalid("--output requires exactly one input"));
     }
-    if cli.output.is_some() && cli.inputs.iter().any(|input| is_zip_archive(input)) {
+    if !cli.compress && cli.output.is_some() && cli.inputs.iter().any(|input| is_zip_archive(input)) {
         return Err(invalid("--output is not supported for ZIP archives"));
     }
     if cli.inputs.iter().any(|input| input == "-") && cli.inputs.len() != 1 {
@@ -126,10 +161,169 @@ fn validate_cli(cli: &Cli) -> fbz::Result<()> {
     if (cli.index || cli.list) && cli.inputs.iter().any(|input| input == "-") {
         return Err(invalid("stdin is supported only for decoding and --test"));
     }
-    if cli.skip_existing && cli.inputs.iter().any(|input| should_extract(cli, input)) {
+    if !cli.compress && cli.skip_existing && cli.inputs.iter().any(|input| should_extract(cli, input)) {
         return Err(invalid("--skip-existing is not supported when extracting archives"));
     }
+    if cli.compress && cli.max_output.is_some() {
+        return Err(invalid("--max-output applies only to decompression"));
+    }
+    if archive_compression && cli.remove_input {
+        return Err(invalid("--rm is not supported when creating archives"));
+    }
     Ok(())
+}
+
+fn inferred_compression_format(path: &Path) -> Option<CompressionFormat> {
+    let name = path.to_string_lossy().to_ascii_lowercase();
+    if name.ends_with(".tar.bz2") || name.ends_with(".tar.bzip2") || name.ends_with(".tbz") || name.ends_with(".tbz2") {
+        Some(CompressionFormat::TarBzip2)
+    } else if name.ends_with(".tar.lz4") {
+        Some(CompressionFormat::TarLz4)
+    } else if name.ends_with(".tar.gz") || name.ends_with(".tar.gzip") || name.ends_with(".tgz") {
+        Some(CompressionFormat::TarGzip)
+    } else if name.ends_with(".zip") {
+        Some(CompressionFormat::Zip)
+    } else if name.ends_with(".gz") || name.ends_with(".gzip") {
+        Some(CompressionFormat::Gzip)
+    } else if name.ends_with(".bz2") || name.ends_with(".bzip2") {
+        Some(CompressionFormat::Bzip2)
+    } else if name.ends_with(".lz4") {
+        Some(CompressionFormat::Lz4)
+    } else {
+        None
+    }
+}
+
+fn compression_format(cli: &Cli) -> fbz::Result<CompressionFormat> {
+    let inferred = cli.output.as_deref().filter(|path| *path != Path::new("-")).and_then(inferred_compression_format);
+    match (cli.format, inferred) {
+        (Some(explicit), Some(inferred)) if explicit != inferred => Err(invalid("--format conflicts with the --output filename")),
+        (Some(explicit), _) | (None, Some(explicit)) => Ok(explicit),
+        (None, None) => Err(invalid("compression format must be selected by --format or the --output filename")),
+    }
+}
+
+fn compressed_output(input: &Path, format: CompressionFormat, directory: Option<&Path>) -> PathBuf {
+    let suffix = match format {
+        CompressionFormat::Bzip2 => ".bz2",
+        CompressionFormat::Gzip => ".gz",
+        CompressionFormat::Lz4 => ".lz4",
+        CompressionFormat::TarBzip2 => ".tar.bz2",
+        CompressionFormat::TarGzip => ".tar.gz",
+        CompressionFormat::TarLz4 => ".tar.lz4",
+        CompressionFormat::Zip => ".zip",
+    };
+    let name = input.file_name().unwrap_or(input.as_os_str());
+    let output = PathBuf::from(format!("{}{suffix}", name.to_string_lossy()));
+    directory.map_or_else(|| PathBuf::from(format!("{}{suffix}", input.display())), |directory| directory.join(output))
+}
+
+fn run_compress(cli: &Cli) -> fbz::Result<()> {
+    let format = compression_format(cli)?;
+    let options = EncodeOptions { threads: cli.threads, memory_limit: cli.memory_limit, level: cli.level };
+    if let Some(directory) = &cli.output_dir {
+        fs::create_dir_all(directory)?;
+    }
+    match format {
+        CompressionFormat::TarBzip2 | CompressionFormat::TarGzip | CompressionFormat::TarLz4 => compress_tar(cli, format, options),
+        CompressionFormat::Zip => compress_zip(cli, options),
+        CompressionFormat::Bzip2 | CompressionFormat::Gzip | CompressionFormat::Lz4 => compress_streams(cli, format, options),
+    }
+}
+
+fn archive_output(cli: &Cli, format: CompressionFormat, kind: &str) -> fbz::Result<PathBuf> {
+    cli.output
+        .clone()
+        .or_else(|| (cli.inputs.len() == 1 && cli.inputs[0] != "-").then(|| compressed_output(Path::new(&cli.inputs[0]), format, cli.output_dir.as_deref())))
+        .ok_or_else(|| invalid(format!("{kind} compression with multiple inputs requires --output")))
+}
+
+fn write_archive_output(cli: &Cli, output: &Path, write: impl FnOnce(&mut dyn Write) -> fbz::Result<()>) -> fbz::Result<()> {
+    if output == Path::new("-") {
+        return write(&mut io::stdout().lock());
+    }
+    if should_skip(output, cli.skip_existing, cli.quiet) {
+        return Ok(());
+    }
+    atomic_write(output, cli.force, |writer| write(writer))
+}
+
+fn compress_tar(cli: &Cli, format: CompressionFormat, options: EncodeOptions) -> fbz::Result<()> {
+    let output = archive_output(cli, format, "tar")?;
+    write_archive_output(cli, &output, |writer| match format {
+        CompressionFormat::TarBzip2 => tar_create::pack_bzip2(&cli.inputs, writer, options).map(|_| ()),
+        CompressionFormat::TarGzip => tar_create::pack_gzip(&cli.inputs, writer, options).map(|_| ()),
+        CompressionFormat::TarLz4 => tar_create::pack_lz4(&cli.inputs, writer, options).map(|_| ()),
+        _ => unreachable!(),
+    })
+}
+
+fn compress_zip(cli: &Cli, options: EncodeOptions) -> fbz::Result<()> {
+    if cli.inputs.iter().any(|input| input == "-") {
+        return Err(invalid("stdin cannot be used as a ZIP archive entry"));
+    }
+    let output = archive_output(cli, CompressionFormat::Zip, "ZIP")?;
+    let inputs = cli
+        .inputs
+        .iter()
+        .map(|input| {
+            let source = PathBuf::from(input);
+            Ok(fbz::zip::PathInput { archive_path: archive_create::archive_name(&source)?, source })
+        })
+        .collect::<fbz::Result<Vec<_>>>()?;
+    write_archive_output(cli, &output, |writer| fbz::zip::create_to_writer(&inputs, writer, options).map(|_| ()))
+}
+
+fn compress_streams(cli: &Cli, format: CompressionFormat, options: EncodeOptions) -> fbz::Result<()> {
+    for input in &cli.inputs {
+        let output = cli
+            .output
+            .clone()
+            .unwrap_or_else(|| if input == "-" { PathBuf::from("-") } else { compressed_output(Path::new(input), format, cli.output_dir.as_deref()) });
+        if output == Path::new("-") {
+            let mut source: Box<dyn Read> = if input == "-" { Box::new(io::stdin().lock()) } else { Box::new(fs::File::open(input)?) };
+            let total = if input == "-" { 0 } else { fs::metadata(input)?.len() };
+            compress_stream(format, &mut source, &mut io::stdout().lock(), options, input, total, cli.quiet)?;
+            if cli.remove_input && input != "-" {
+                fs::remove_file(input)?;
+            }
+        } else {
+            if should_skip(&output, cli.skip_existing, cli.quiet) {
+                continue;
+            }
+            let input_path = Path::new(input);
+            if input_path == output {
+                return Err(invalid(format!("input and output are both {}", input_path.display())));
+            }
+            let mut source = fs::File::open(input_path)?;
+            let total = source.metadata()?.len();
+            atomic_write(&output, cli.force, |writer| compress_stream(format, &mut source, writer, options, input, total, cli.quiet))?;
+            preserve_metadata(input_path, &output)?;
+            if cli.remove_input {
+                fs::remove_file(input_path)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn compress_stream(
+    format: CompressionFormat,
+    input: &mut impl Read,
+    output: &mut impl Write,
+    options: EncodeOptions,
+    label: &str,
+    total: u64,
+    quiet: bool,
+) -> fbz::Result<()> {
+    let format = match format {
+        CompressionFormat::Bzip2 => fbz::EncodeFormat::Bzip2,
+        CompressionFormat::Gzip => fbz::EncodeFormat::Gzip,
+        CompressionFormat::Lz4 => fbz::EncodeFormat::Lz4,
+        _ => return Err(invalid("selected format is not a standalone stream codec")),
+    };
+    let mut display = ProgressDisplay::new(label, total, quiet || total == 0);
+    fbz::compress_to_writer_with_progress(input, output, format, options, |progress| display.update_encode(progress)).map(|_| ())
 }
 
 fn should_extract(cli: &Cli, input: &str) -> bool {
@@ -416,27 +610,37 @@ impl ProgressDisplay {
     }
 
     fn update(&mut self, progress: DecodeProgress) {
+        let compressed = progress.compressed_bytes.min(self.total);
+        let ratio = if compressed == 0 { 0.0 } else { progress.decoded_bytes as f64 / compressed as f64 };
+        self.render(compressed, compressed, progress.decoded_bytes, progress.decoded_bytes, ratio);
+    }
+
+    fn update_encode(&mut self, progress: EncodeProgress) {
+        let input = progress.input_bytes.min(self.total);
+        let ratio = if progress.output_bytes == 0 { 0.0 } else { progress.input_bytes as f64 / progress.output_bytes as f64 };
+        self.render(input, progress.input_bytes, progress.output_bytes, progress.input_bytes, ratio);
+    }
+
+    fn render(&mut self, completed: u64, left: u64, right: u64, throughput: u64, ratio: f64) {
         if !self.enabled {
             return;
         }
         let elapsed = self.started.elapsed();
-        let finished = progress.compressed_bytes >= self.total;
+        let finished = completed >= self.total;
         if (!self.drawn && elapsed < Duration::from_millis(200)) || (!finished && self.last_draw.elapsed() < Duration::from_millis(100)) {
             return;
         }
-        let compressed = progress.compressed_bytes.min(self.total);
-        let percent = if self.total == 0 { 100.0 } else { compressed as f64 * 100.0 / self.total as f64 };
+        let percent = if self.total == 0 { 100.0 } else { completed as f64 * 100.0 / self.total as f64 };
         let seconds = elapsed.as_secs_f64().max(0.001);
-        let rate = progress.decoded_bytes as f64 / seconds;
-        let ratio = if compressed == 0 { 0.0 } else { progress.decoded_bytes as f64 / compressed as f64 };
-        let eta = if compressed == 0 || finished { 0.0 } else { seconds * (self.total - compressed) as f64 / compressed as f64 };
+        let rate = throughput as f64 / seconds;
+        let eta = if completed == 0 || finished { 0.0 } else { seconds * (self.total - completed) as f64 / completed as f64 };
         let _ = write!(
             self.stderr,
             "\r\x1b[2K{}: {:5.1}%  {} → {}  {}/s  {:.1}×  ETA {}",
             self.label,
             percent,
-            format_bytes(compressed),
-            format_bytes(progress.decoded_bytes),
+            format_bytes(left),
+            format_bytes(right),
             format_bytes(rate as u64),
             ratio,
             format_duration(eta),

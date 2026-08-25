@@ -1,11 +1,14 @@
-//! Portable bzip2 primitives and format inspection.
+//! Fast parallel compression and decompression for bzip2, gzip, LZ4, and ZIP.
 
 mod bitreader;
 mod block;
+mod bz2_encode;
 mod crc;
 mod decode;
 mod decoder;
 pub mod deflate;
+mod deflate_encode;
+mod encode;
 mod error;
 mod format;
 pub mod gzip;
@@ -13,19 +16,24 @@ mod history;
 mod index;
 mod indexed;
 pub mod lz4;
+mod lz4_encode;
+mod matchfinder;
 mod output;
 mod pipeline;
 mod reader;
 mod source;
 mod stream;
+pub mod zip;
 
 pub use bitreader::BitReader;
 pub use block::{MAX_DECODED_BLOCK, MAX_ENCODED_BLOCK, decode_block};
+pub use bz2_encode::{EncodeReport as Bzip2EncodeReport, Encoder as Bzip2Encoder, compress as compress_bzip2, compress_to_writer as compress_bzip2_to_writer};
 pub use crc::{bz2_crc32, combine_stream_crc};
 pub use decode::{
     DEFAULT_MEMORY_LIMIT, DecodeOptions, DecodeProgress, build_index, build_index_with_progress, decode_to_writer, decode_to_writer_with_progress, decompress,
     decompress_to_sink_with_progress, decompress_to_writer, decompress_to_writer_with_progress,
 };
+pub use encode::{EncodeFormat, EncodeOptions, EncodeProgress, EncodeReport, Encoder, compress, compress_to_writer, compress_to_writer_with_progress};
 pub use error::{DecodeError, Error, Result};
 pub use format::{BLOCK_MAGIC, BlockCandidate, END_MAGIC, EndCandidate, ScanResult, StreamHeaderCandidate, scan};
 pub use index::{BlockIndex, Index, StreamIndex};
@@ -78,6 +86,19 @@ mod python {
     fn py_decompress(py: Python<'_>, data: &[u8], threads: usize, memory_limit: usize) -> PyResult<Py<PyBytes>> {
         let data = data.to_vec();
         let output = py.detach(move || crate::decompress(&data, crate::DecodeOptions { threads, memory_limit })).map_err(python_error)?;
+        Ok(PyBytes::new(py, &output).unbind())
+    }
+
+    #[pyfunction(name = "_compress", signature = (data, format, threads=0, memory_limit=crate::DEFAULT_MEMORY_LIMIT, level=None))]
+    fn py_compress(py: Python<'_>, data: &[u8], format: &str, threads: usize, memory_limit: usize, level: Option<u8>) -> PyResult<Py<PyBytes>> {
+        let format = match format {
+            "bzip2" => crate::EncodeFormat::Bzip2,
+            "gzip" => crate::EncodeFormat::Gzip,
+            "lz4" => crate::EncodeFormat::Lz4,
+            _ => return Err(PyValueError::new_err("format must be 'bzip2', 'gzip', or 'lz4'")),
+        };
+        let data = data.to_vec();
+        let output = py.detach(move || crate::compress(&data, format, crate::EncodeOptions { threads, memory_limit, level })).map_err(python_error)?;
         Ok(PyBytes::new(py, &output).unbind())
     }
 
@@ -188,6 +209,7 @@ mod python {
         m.add_function(wrap_pyfunction!(py_scan, m)?)?;
         m.add_function(wrap_pyfunction!(py_bz2_crc32, m)?)?;
         m.add_function(wrap_pyfunction!(py_decompress, m)?)?;
+        m.add_function(wrap_pyfunction!(py_compress, m)?)?;
         m.add_function(wrap_pyfunction!(py_build_index, m)?)?;
         m.add_function(wrap_pyfunction!(py_test, m)?)?;
         m.add_class::<PyIndexedReader>()?;
