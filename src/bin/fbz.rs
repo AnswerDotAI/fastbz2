@@ -15,8 +15,8 @@ use std::{
 
 use clap::{ArgGroup, Parser};
 use fbz::{
-    DecodeOptions, DecodeProgress, Error, Index, OutputSink, Source, WriterSink, build_index_with_progress, decode_to_writer_with_progress,
-    decompress_to_sink_with_progress, gzip, lz4,
+    DecodeOptions, DecodeProgress, Error, Format, Index, OutputSink, Source, WriterSink, build_index_with_progress, decode_stream_to_sink_with_progress,
+    decode_to_writer_with_progress, gzip, lz4,
 };
 use serde_json::{Value, json};
 use tempfile::NamedTempFile;
@@ -83,14 +83,6 @@ struct Cli {
     /// Emit `--list` output as JSON.
     #[arg(long, requires = "list")]
     json: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Format {
-    Bzip2,
-    Gzip,
-    Lz4,
-    Zip,
 }
 
 fn main() -> ExitCode {
@@ -326,12 +318,7 @@ fn decode_data_to_sink(
 ) -> fbz::Result<()> {
     let mut output = LimitedOutput::new(output, max_output);
     let mut display = ProgressDisplay::new(label, data.len() as u64, quiet);
-    match select_format(label, data)? {
-        Format::Bzip2 => decompress_to_sink_with_progress(data, &mut output, options, |progress| display.update(progress)),
-        Format::Gzip => gzip::decompress_to_sink_with_options_and_progress(data, &mut output, options, |progress| display.update(progress)).map(|_| ()),
-        Format::Lz4 => lz4::decompress_to_sink_with_options_and_progress(data, &mut output, options, |progress| display.update(progress)).map(|_| ()),
-        Format::Zip => Err(invalid("ZIP archives extract to a directory and cannot be decoded to one output stream")),
-    }
+    decode_stream_to_sink_with_progress(select_format(label, data)?, data, &mut output, options, |progress| display.update(progress))
 }
 
 fn build_gzip_report_data(data: &[u8], label: &str, options: DecodeOptions, max_output: Option<usize>, quiet: bool) -> fbz::Result<gzip::Report> {
@@ -405,6 +392,10 @@ impl<W: OutputSink> OutputSink for LimitedOutput<W> {
 
     fn flush(&mut self) -> io::Result<()> {
         self.inner.flush()
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.inner.is_cancelled()
     }
 }
 
@@ -540,22 +531,7 @@ fn default_output(input: &Path) -> PathBuf {
 }
 
 fn select_format(input: &str, data: &[u8]) -> fbz::Result<Format> {
-    if let Some((format, _)) = format_extension(Path::new(input)) {
-        return Ok(format);
-    }
-    if data.starts_with(b"BZh") {
-        Ok(Format::Bzip2)
-    } else if data.starts_with(&[0x1f, 0x8b]) {
-        Ok(Format::Gzip)
-    } else if data.starts_with(&[0x04, 0x22, 0x4d, 0x18])
-        || data.get(..4).is_some_and(|magic| (0x184d_2a50..=0x184d_2a5f).contains(&u32::from_le_bytes(magic.try_into().unwrap())))
-    {
-        Ok(Format::Lz4)
-    } else if data.starts_with(b"PK\x03\x04") || data.starts_with(b"PK\x05\x06") || data.starts_with(b"PK\x07\x08") {
-        Ok(Format::Zip)
-    } else {
-        Err(invalid(format!("cannot determine compression format for {input}; expected a bzip2, gzip, LZ4, or ZIP extension or magic")))
-    }
+    Format::detect(input, data)
 }
 
 fn print_index(input: Option<&String>, index: &Index) {
@@ -805,7 +781,13 @@ fn exit_status(error: &Error) -> u8 {
         Error::Io(source) if source.kind() == io::ErrorKind::InvalidData => 3,
         Error::Io(_) => 1,
         Error::InvalidConfiguration(_) => 2,
-        Error::InvalidStreamHeader | Error::InvalidGzip(_) | Error::InvalidLz4(_) | Error::InvalidZip(_) | Error::Decode { .. } | Error::InvalidIndex(_) => 3,
+        Error::InvalidStreamHeader
+        | Error::InvalidGzip(_)
+        | Error::InvalidLz4(_)
+        | Error::InvalidZip(_)
+        | Error::UnsupportedFormat(_)
+        | Error::Decode { .. }
+        | Error::InvalidIndex(_) => 3,
         _ => 4,
     }
 }

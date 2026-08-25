@@ -210,6 +210,10 @@ impl<W: OutputSink> OutputSink for ExpectedOutput<W> {
     fn flush(&mut self) -> io::Result<()> {
         self.inner.flush()
     }
+
+    fn is_cancelled(&self) -> bool {
+        self.inner.is_cancelled()
+    }
 }
 
 fn entry_error(entry: &Entry, error: Error) -> Error {

@@ -16,11 +16,11 @@ pip install fbz
 
 Python 3.10 and later are supported. Prebuilt wheels target Linux on x86-64 and ARM64, and macOS on ARM64. macOS Intel is best-effort and can build from source.
 
-The Rust crate is not yet published separately on crates.io. Install the CLI from the repository, or add the library as a Git dependency:
+Install the native CLI or add the Rust library from crates.io:
 
 ```bash
-cargo install --git https://github.com/AnswerDotAI/fbz
-cargo add fbz --git https://github.com/AnswerDotAI/fbz
+cargo install fbz
+cargo add fbz
 ```
 
 ## CLI
@@ -156,6 +156,27 @@ let plain = fbz::lz4::decompress(&compressed_lz4)?;
 ```
 
 It accepts standard independent or linked blocks, stored blocks, all four standard block maxima, optional block/content checksums and sizes, concatenated frames, and skippable frames. External dictionaries and the obsolete legacy frame format are intentionally unsupported.
+
+### Streaming reads
+
+`fbz::Reader` provides a normal `std::io::Read` over bzip2 or gzip files without a preliminary indexing or validation pass:
+
+```rust
+use std::io::{BufReader, Read};
+use fbz::{DecodeOptions, Reader};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let reader = Reader::open("dump.xml.bz2", DecodeOptions::default())?;
+    let mut reader = BufReader::new(reader);
+    let mut header = [0; 4096];
+    reader.read_exact(&mut header)?;
+    Ok(())
+}
+```
+
+Magic takes priority over the filename extension, with the extension used as a fallback for damaged headers. The decoder runs on an owned worker thread and transfers completed decoder allocations through a zero-capacity pipe; it neither materializes the plaintext nor writes an intermediate file. `DecodeOptions` controls decoder threads and speculative memory. Dropping early disconnects the pipe, cancels outstanding work, and joins the worker.
+
+Checksum errors discovered after output has begun are returned by a later `read()` call. Therefore only successful EOF establishes that the complete stream was valid; dropping early deliberately does not finish validation. Compressed tar inputs yield the decoded tar byte stream rather than extracting it. LZ4 and ZIP are not currently exposed through `Reader`: LZ4's frame-layout pass must first become incremental, while ZIP has no single decoded byte stream.
 
 ## Performance
 

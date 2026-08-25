@@ -15,7 +15,9 @@ mod indexed;
 pub mod lz4;
 mod output;
 mod pipeline;
+mod reader;
 mod source;
+mod stream;
 
 pub use bitreader::BitReader;
 pub use block::{MAX_DECODED_BLOCK, MAX_ENCODED_BLOCK, decode_block};
@@ -28,8 +30,10 @@ pub use error::{DecodeError, Error, Result};
 pub use format::{BLOCK_MAGIC, BlockCandidate, END_MAGIC, EndCandidate, ScanResult, StreamHeaderCandidate, scan};
 pub use index::{BlockIndex, Index, StreamIndex};
 pub use indexed::{DEFAULT_CACHE_LIMIT, IndexedReader};
-pub use output::{OutputSink, WriterSink};
+pub use output::{OutputSink, PipeReader, PipeWriter, WriterSink, output_pipe};
+pub use reader::Reader;
 pub use source::Source;
+pub use stream::{Format, decode_stream_to_sink_with_progress};
 
 #[cfg(feature = "python")]
 mod python {
