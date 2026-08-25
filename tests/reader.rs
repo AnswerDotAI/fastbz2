@@ -5,7 +5,7 @@ use std::{
 };
 
 use crabz2::{Level, compress};
-use fbz::{DecodeOptions, Error, Reader};
+use fbz::{DecodeFormat, DecodeOptions, Error, Reader};
 use flate2::{Compression, write::GzEncoder};
 use lz4_flex::frame::{BlockMode, BlockSize, FrameEncoder, FrameInfo};
 
@@ -49,6 +49,20 @@ fn reader_detects_stream_formats_without_prevalidation() {
     let corrupt = directory.path().join("corrupt.gz");
     fs::write(&corrupt, b"not a gzip stream").unwrap();
     let mut reader = Reader::open(corrupt, DecodeOptions::default()).unwrap();
+    assert_eq!(reader.read(&mut [0; 1]).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+}
+
+#[test]
+fn explicit_reader_format_overrides_magic_and_extension_detection() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("misleading.bz2");
+    let plain = b"explicit gzip selection".repeat(10_000);
+    fs::write(&path, gzip(&plain)).unwrap();
+    let options = DecodeOptions { format: DecodeFormat::Gzip, threads: 2, ..DecodeOptions::default() };
+    assert_eq!(read(&path, options).unwrap(), plain);
+
+    let options = DecodeOptions { format: DecodeFormat::Bzip2, ..DecodeOptions::default() };
+    let mut reader = Reader::open(path, options).unwrap();
     assert_eq!(reader.read(&mut [0; 1]).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
 }
 

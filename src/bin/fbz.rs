@@ -129,7 +129,7 @@ fn run(cli: Cli) -> fbz::Result<()> {
     if cli.compress {
         return run_compress(&cli);
     }
-    let options = DecodeOptions { threads: cli.threads, memory_limit: cli.memory_limit };
+    let options = DecodeOptions { threads: cli.threads, memory_limit: cli.memory_limit, ..DecodeOptions::default() };
     if cli.test {
         for input in &cli.inputs {
             test_input(input, options, cli.max_output, cli.quiet)?;

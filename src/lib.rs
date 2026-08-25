@@ -30,8 +30,9 @@ pub use block::{MAX_DECODED_BLOCK, MAX_ENCODED_BLOCK, decode_block};
 pub use bz2_encode::{EncodeReport as Bzip2EncodeReport, Encoder as Bzip2Encoder, compress as compress_bzip2, compress_to_writer as compress_bzip2_to_writer};
 pub use crc::{bz2_crc32, combine_stream_crc};
 pub use decode::{
-    DEFAULT_MEMORY_LIMIT, DecodeOptions, DecodeProgress, build_index, build_index_with_progress, decode_to_writer, decode_to_writer_with_progress, decompress,
-    decompress_to_sink_with_progress, decompress_to_writer, decompress_to_writer_with_progress,
+    DEFAULT_MEMORY_LIMIT, DecodeOptions, DecodeProgress, build_index, build_index_with_progress, decode_to_writer, decode_to_writer_with_progress,
+    decompress as decompress_bzip2, decompress_to_sink_with_progress, decompress_to_writer as decompress_bzip2_to_writer,
+    decompress_to_writer_with_progress as decompress_bzip2_to_writer_with_progress,
 };
 pub use encode::{EncodeFormat, EncodeOptions, EncodeProgress, EncodeReport, Encoder, compress, compress_to_writer, compress_to_writer_with_progress};
 pub use error::{DecodeError, Error, Result};
@@ -41,7 +42,7 @@ pub use indexed::{DEFAULT_CACHE_LIMIT, IndexedReader};
 pub use output::{OutputSink, PipeReader, PipeWriter, WriterSink, output_pipe};
 pub use reader::Reader;
 pub use source::Source;
-pub use stream::{Format, decode_stream_to_sink_with_progress};
+pub use stream::{DecodeFormat, Format, decode_stream_to_sink_with_progress, decompress, decompress_to_writer, decompress_to_writer_with_progress};
 
 #[cfg(feature = "python")]
 mod python {
@@ -51,19 +52,42 @@ mod python {
     };
 
     use pyo3::{
+        buffer::PyBuffer,
         create_exception,
-        exceptions::{PyOSError, PyValueError},
+        exceptions::{PyOSError, PyTypeError, PyValueError},
         prelude::*,
         types::PyBytes,
     };
 
-    create_exception!(fbz, BadBzip2File, PyOSError);
+    create_exception!(fbz, BadCompressedFile, PyOSError);
+
+    fn decode_format(format: Option<&str>) -> PyResult<crate::DecodeFormat> {
+        match format {
+            None | Some("auto") => Ok(crate::DecodeFormat::Auto),
+            Some("bzip2") => Ok(crate::DecodeFormat::Bzip2),
+            Some("gzip") => Ok(crate::DecodeFormat::Gzip),
+            Some("lz4") => Ok(crate::DecodeFormat::Lz4),
+            Some(_) => Err(PyValueError::new_err("format must be 'bzip2', 'gzip', 'lz4', or None")),
+        }
+    }
+
+    fn decode_options(format: Option<&str>, threads: usize, memory_limit: usize) -> PyResult<crate::DecodeOptions> {
+        Ok(crate::DecodeOptions { format: decode_format(format)?, threads, memory_limit })
+    }
 
     fn python_error(error: crate::Error) -> PyErr {
         match error {
             crate::Error::Io(source) => PyOSError::new_err(source.to_string()),
             crate::Error::InvalidConfiguration(message) | crate::Error::InvalidIndex(message) => PyValueError::new_err(message),
-            error => BadBzip2File::new_err(error.to_string()),
+            error => BadCompressedFile::new_err(error.to_string()),
+        }
+    }
+
+    fn python_read_error(error: std::io::Error) -> PyErr {
+        match error.kind() {
+            std::io::ErrorKind::InvalidData => BadCompressedFile::new_err(error.to_string()),
+            std::io::ErrorKind::InvalidInput => PyValueError::new_err(error.to_string()),
+            _ => PyOSError::new_err(error.to_string()),
         }
     }
 
@@ -82,10 +106,11 @@ mod python {
         crate::bz2_crc32(data)
     }
 
-    #[pyfunction(name = "_decompress", signature = (data, threads=0, memory_limit=crate::DEFAULT_MEMORY_LIMIT))]
-    fn py_decompress(py: Python<'_>, data: &[u8], threads: usize, memory_limit: usize) -> PyResult<Py<PyBytes>> {
+    #[pyfunction(name = "_decompress", signature = (data, format=None, threads=0, memory_limit=crate::DEFAULT_MEMORY_LIMIT))]
+    fn py_decompress(py: Python<'_>, data: &[u8], format: Option<&str>, threads: usize, memory_limit: usize) -> PyResult<Py<PyBytes>> {
+        let options = decode_options(format, threads, memory_limit)?;
         let data = data.to_vec();
-        let output = py.detach(move || crate::decompress(&data, crate::DecodeOptions { threads, memory_limit })).map_err(python_error)?;
+        let output = py.detach(move || crate::decompress(&data, options)).map_err(python_error)?;
         Ok(PyBytes::new(py, &output).unbind())
     }
 
@@ -107,20 +132,86 @@ mod python {
         let encoded = py
             .detach(move || {
                 let source = crate::Source::open(path)?;
-                Ok::<_, crate::Error>(crate::build_index(source.as_slice(), crate::DecodeOptions { threads, memory_limit })?.to_bytes())
+                Ok::<_, crate::Error>(
+                    crate::build_index(source.as_slice(), crate::DecodeOptions { threads, memory_limit, ..crate::DecodeOptions::default() })?.to_bytes(),
+                )
             })
             .map_err(python_error)?;
         Ok(PyBytes::new(py, &encoded).unbind())
     }
 
-    #[pyfunction(name = "_test", signature = (path, threads=0, memory_limit=crate::DEFAULT_MEMORY_LIMIT))]
-    fn py_test(py: Python<'_>, path: String, threads: usize, memory_limit: usize) -> PyResult<()> {
+    #[pyfunction(name = "_test_path", signature = (path, format=None, threads=0, memory_limit=crate::DEFAULT_MEMORY_LIMIT))]
+    fn py_test_path(py: Python<'_>, path: String, format: Option<&str>, threads: usize, memory_limit: usize) -> PyResult<()> {
+        let options = decode_options(format, threads, memory_limit)?;
         py.detach(move || {
-            let source = crate::Source::open(path)?;
-            crate::build_index(source.as_slice(), crate::DecodeOptions { threads, memory_limit })?;
-            Ok::<_, crate::Error>(())
+            let source = crate::Source::open(&path)?;
+            let stream_format = options.format.detect_path(std::path::Path::new(&path), source.as_slice())?;
+            let mut output = crate::WriterSink::new(std::io::sink());
+            crate::decode_stream_to_sink_with_progress(stream_format, source.as_slice(), &mut output, options, |_| {})
         })
         .map_err(python_error)
+    }
+
+    #[pyfunction(name = "_test_bytes", signature = (data, format=None, threads=0, memory_limit=crate::DEFAULT_MEMORY_LIMIT))]
+    fn py_test_bytes(py: Python<'_>, data: &[u8], format: Option<&str>, threads: usize, memory_limit: usize) -> PyResult<()> {
+        let options = decode_options(format, threads, memory_limit)?;
+        let data = data.to_vec();
+        py.detach(move || crate::decompress_to_writer(&data, &mut std::io::sink(), options)).map_err(python_error)
+    }
+
+    #[pyclass(name = "_Reader")]
+    struct PyReader {
+        inner: Mutex<crate::Reader>,
+    }
+
+    const PY_READINTO_CHUNK: usize = 1024 * 1024;
+
+    #[pymethods]
+    impl PyReader {
+        #[staticmethod]
+        #[pyo3(signature = (path, format=None, threads=0, memory_limit=crate::DEFAULT_MEMORY_LIMIT))]
+        fn from_path(path: String, format: Option<&str>, threads: usize, memory_limit: usize) -> PyResult<Self> {
+            let options = decode_options(format, threads, memory_limit)?;
+            Ok(Self { inner: Mutex::new(crate::Reader::open(path, options).map_err(python_error)?) })
+        }
+
+        fn read(&self, py: Python<'_>, size: i64) -> PyResult<Py<PyBytes>> {
+            let output = py
+                .detach(|| {
+                    let mut reader = self.inner.lock().map_err(|_| std::io::Error::other("reader lock poisoned"))?;
+                    if size < 0 {
+                        let mut output = Vec::new();
+                        reader.read_to_end(&mut output)?;
+                        Ok(output)
+                    } else {
+                        let count = usize::try_from(size)
+                            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "requested read does not fit this platform"))?;
+                        let mut output = vec![0; count];
+                        let count = reader.read(&mut output)?;
+                        output.truncate(count);
+                        Ok(output)
+                    }
+                })
+                .map_err(python_read_error)?;
+            Ok(PyBytes::new(py, &output).unbind())
+        }
+
+        fn readinto(&self, py: Python<'_>, buffer: PyBuffer<u8>) -> PyResult<usize> {
+            if buffer.as_mut_slice(py).is_none() {
+                return Err(PyTypeError::new_err("readinto() requires a writable, contiguous byte buffer"));
+            }
+            let mut output = vec![0; buffer.item_count().min(PY_READINTO_CHUNK)];
+            let count = py
+                .detach(|| {
+                    let mut reader = self.inner.lock().map_err(|_| std::io::Error::other("reader lock poisoned"))?;
+                    reader.read(&mut output)
+                })
+                .map_err(python_read_error)?;
+            for (destination, byte) in buffer.as_mut_slice(py).unwrap()[..count].iter().zip(&output) {
+                destination.set(*byte);
+            }
+            Ok(count)
+        }
     }
 
     #[pyclass(name = "_IndexedReader")]
@@ -136,7 +227,12 @@ mod python {
             let inner = py
                 .detach(move || match index_path {
                     Some(index_path) => crate::IndexedReader::open_with_index(path, index_path, cache_limit),
-                    None => crate::IndexedReader::from_source(crate::Source::open(path)?, None, crate::DecodeOptions { threads, memory_limit }, cache_limit),
+                    None => crate::IndexedReader::from_source(
+                        crate::Source::open(path)?,
+                        None,
+                        crate::DecodeOptions { threads, memory_limit, ..crate::DecodeOptions::default() },
+                        cache_limit,
+                    ),
                 })
                 .map_err(python_error)?;
             Ok(Self { inner: Mutex::new(inner) })
@@ -150,9 +246,12 @@ mod python {
             let inner = py
                 .detach(move || match index {
                     Some(index) => crate::IndexedReader::from_bytes_with_index(data, &index, cache_limit),
-                    None => {
-                        crate::IndexedReader::from_source(crate::Source::from_bytes(data), None, crate::DecodeOptions { threads, memory_limit }, cache_limit)
-                    }
+                    None => crate::IndexedReader::from_source(
+                        crate::Source::from_bytes(data),
+                        None,
+                        crate::DecodeOptions { threads, memory_limit, ..crate::DecodeOptions::default() },
+                        cache_limit,
+                    ),
                 })
                 .map_err(python_error)?;
             Ok(Self { inner: Mutex::new(inner) })
@@ -211,9 +310,11 @@ mod python {
         m.add_function(wrap_pyfunction!(py_decompress, m)?)?;
         m.add_function(wrap_pyfunction!(py_compress, m)?)?;
         m.add_function(wrap_pyfunction!(py_build_index, m)?)?;
-        m.add_function(wrap_pyfunction!(py_test, m)?)?;
+        m.add_function(wrap_pyfunction!(py_test_path, m)?)?;
+        m.add_function(wrap_pyfunction!(py_test_bytes, m)?)?;
+        m.add_class::<PyReader>()?;
         m.add_class::<PyIndexedReader>()?;
-        m.add("BadBzip2File", m.py().get_type::<BadBzip2File>())?;
+        m.add("BadCompressedFile", m.py().get_type::<BadCompressedFile>())?;
         m.add("__version__", env!("CARGO_PKG_VERSION"))?;
         Ok(())
     }

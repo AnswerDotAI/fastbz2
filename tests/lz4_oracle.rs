@@ -79,5 +79,5 @@ fn incompressible_multiblock_input_exercises_parallel_scheduler() {
 fn a_small_speculative_budget_falls_back_to_incremental_serial_blocks() {
     let data = b"large declared blocks do not require speculative memory ".repeat(120_000);
     let encoded = encode(&data, BlockSize::Max4MB, BlockMode::Independent, true, true, true);
-    assert_matches(&data, &encoded, DecodeOptions { threads: 4, memory_limit: MAX_DECODED_BLOCK });
+    assert_matches(&data, &encoded, DecodeOptions { threads: 4, memory_limit: MAX_DECODED_BLOCK, ..DecodeOptions::default() });
 }
