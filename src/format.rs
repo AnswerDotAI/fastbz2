@@ -1,3 +1,5 @@
+use std::io;
+
 use crate::{BitReader, Error, Result};
 use rayon::{ThreadPool, prelude::*};
 
@@ -49,21 +51,35 @@ pub fn scan(data: &[u8]) -> Result<ScanResult> {
     Ok(scan_range(data, 0, data.len()))
 }
 
-pub(crate) fn scan_with_pool(data: &[u8], pool: Option<&ThreadPool>) -> Result<ScanResult> {
+pub(crate) fn scan_with_pool(data: &[u8], pool: Option<&ThreadPool>, mut cancelled: impl FnMut() -> bool) -> Result<ScanResult> {
     if !is_stream_header(data, 0) {
         return Err(Error::InvalidStreamHeader);
     }
-    let Some(pool) = pool.filter(|_| data.len() > SCAN_CHUNK) else { return Ok(scan_range(data, 0, data.len())) };
-    let chunks = data.len().div_ceil(SCAN_CHUNK);
-    let partial: Vec<_> =
-        pool.install(|| (0..chunks).into_par_iter().map(|chunk| scan_range(data, chunk * SCAN_CHUNK, ((chunk + 1) * SCAN_CHUNK).min(data.len()))).collect());
-    let mut result = ScanResult { streams: Vec::new(), blocks: Vec::new(), stream_ends: Vec::new() };
-    for mut chunk in partial {
-        result.streams.append(&mut chunk.streams);
-        result.blocks.append(&mut chunk.blocks);
-        result.stream_ends.append(&mut chunk.stream_ends);
+    let cancellation_error = || Error::Io(io::Error::new(io::ErrorKind::BrokenPipe, "output reader stopped reading"));
+    if cancelled() {
+        return Err(cancellation_error());
     }
-    Ok(result)
+    let Some(pool) = pool.filter(|_| data.len() > SCAN_CHUNK) else {
+        let result = scan_range(data, 0, data.len());
+        return if cancelled() { Err(cancellation_error()) } else { Ok(result) };
+    };
+    let chunks = data.len().div_ceil(SCAN_CHUNK);
+    let mut result = ScanResult { streams: Vec::new(), blocks: Vec::new(), stream_ends: Vec::new() };
+    let wave = pool.current_num_threads().max(1);
+    for first in (0..chunks).step_by(wave) {
+        if cancelled() {
+            return Err(cancellation_error());
+        }
+        let end = first.saturating_add(wave).min(chunks);
+        let partial: Vec<_> = pool
+            .install(|| (first..end).into_par_iter().map(|chunk| scan_range(data, chunk * SCAN_CHUNK, ((chunk + 1) * SCAN_CHUNK).min(data.len()))).collect());
+        for mut chunk in partial {
+            result.streams.append(&mut chunk.streams);
+            result.blocks.append(&mut chunk.blocks);
+            result.stream_ends.append(&mut chunk.stream_ends);
+        }
+    }
+    if cancelled() { Err(cancellation_error()) } else { Ok(result) }
 }
 
 fn scan_range(data: &[u8], start: usize, end: usize) -> ScanResult {

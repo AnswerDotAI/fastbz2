@@ -191,6 +191,7 @@ struct Decoder {
 
 pub(crate) struct DecodedCandidate {
     pub output: Vec<u8>,
+    pub decoded_len: usize,
     pub end_bit: u64,
     pub block_len: usize,
 }
@@ -380,7 +381,18 @@ pub(crate) fn decode_candidate(data: &[u8], start_bit: u64, expected_crc: u32) -
         return Err(decode_error(start_bit, DecodeError::InvalidMagic));
     }
     let (output, _, block_len) = Decoder::new().block(&mut bits, 9, Some(expected_crc))?;
-    Ok(DecodedCandidate { output, end_bit: bits.position(), block_len })
+    let decoded_len = output.len();
+    Ok(DecodedCandidate { output, decoded_len, end_bit: bits.position(), block_len })
+}
+
+pub(crate) fn decode_first_candidate(data: &[u8]) -> Result<(u32, DecodedCandidate)> {
+    let mut bits = Bits::at(data, 32)?;
+    if bits.magic()? != BLOCK_MAGIC {
+        return Err(decode_error(32, DecodeError::InvalidMagic));
+    }
+    let (output, expected_crc, block_len) = Decoder::new().block(&mut bits, 9, None)?;
+    let decoded_len = output.len();
+    Ok((expected_crc, DecodedCandidate { output, decoded_len, end_bit: bits.position(), block_len }))
 }
 
 pub(crate) fn decode_block(data: &[u8], start_bit: u64, end_bit: u64, level: u8, expected_crc: u32) -> Result<Vec<u8>> {
