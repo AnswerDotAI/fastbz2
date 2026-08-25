@@ -284,7 +284,7 @@ pub(crate) fn thread_pool(threads: usize) -> Result<Option<Arc<ThreadPool>>> {
     }
     ThreadPoolBuilder::new()
         .num_threads(threads)
-        .thread_name(|number| format!("fastbz2-{number}"))
+        .thread_name(|number| format!("fbz-{number}"))
         .build()
         .map(Arc::new)
         .map(Some)

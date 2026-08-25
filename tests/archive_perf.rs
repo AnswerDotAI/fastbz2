@@ -6,7 +6,7 @@ use std::{
 };
 
 use crabz2::{Level, compress};
-use fastbz2::{DecodeOptions, OutputSink, gzip as gzip_decoder};
+use fbz::{DecodeOptions, OutputSink, gzip as gzip_decoder};
 use flate2::{Compression, write::GzEncoder};
 
 #[allow(dead_code)]
@@ -14,11 +14,11 @@ mod support;
 use support::simplewiki_prefix;
 
 fn requested_threads() -> usize {
-    std::env::var("FASTBZ2_THREADS").ok().map(|value| value.parse().expect("FASTBZ2_THREADS must be an integer")).unwrap_or(0)
+    std::env::var("FBZ_THREADS").ok().map(|value| value.parse().expect("FBZ_THREADS must be an integer")).unwrap_or(0)
 }
 
 fn binary() -> Command {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_fastbz2"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_fbz"));
     command.args(["-P", &requested_threads().to_string()]);
     command
 }
@@ -70,7 +70,7 @@ fn fixture(extension: &str, encode: impl Fn(&[u8]) -> Vec<u8>) -> Fixture {
     Fixture { directory, contents, input }
 }
 
-fn fastbz2_overhead(extension: &str, encode: impl Fn(&[u8]) -> Vec<u8>) {
+fn fbz_overhead(extension: &str, encode: impl Fn(&[u8]) -> Vec<u8>) {
     let fixture = fixture(extension, encode);
     let warm = fixture.directory.path().join("warm");
     fs::create_dir(&warm).unwrap();
@@ -83,7 +83,7 @@ fn fastbz2_overhead(extension: &str, encode: impl Fn(&[u8]) -> Vec<u8>) {
     assert_eq!(fs::read(extracted.join("payload.bin")).unwrap(), fixture.contents);
 
     let raw_ratio = extract_time.as_secs_f64() / raw_time.as_secs_f64();
-    eprintln!("{extension}: raw tar {raw_time:.3?}, fastbz2 extract {extract_time:.3?} ({raw_ratio:.3}x raw)");
+    eprintln!("{extension}: raw tar {raw_time:.3?}, fbz extract {extract_time:.3?} ({raw_ratio:.3}x raw)");
     assert!(raw_ratio <= 3.0, "tar extraction exceeded the broad 3x raw-decode guard; measured {raw_ratio:.3}x");
 }
 
@@ -179,9 +179,9 @@ fn tgz_output_cadence() {
 }
 
 #[test]
-#[ignore = "local single-run fastbz2 gzip tar extraction overhead"]
-fn tgz_fastbz2_overhead() {
-    fastbz2_overhead("tgz", gzip);
+#[ignore = "local single-run fbz gzip tar extraction overhead"]
+fn tgz_fbz_overhead() {
+    fbz_overhead("tgz", gzip);
 }
 
 #[test]
@@ -191,9 +191,9 @@ fn tgz_system_reference() {
 }
 
 #[test]
-#[ignore = "local single-run fastbz2 bzip2 tar extraction overhead"]
-fn tbz2_fastbz2_overhead() {
-    fastbz2_overhead("tbz2", |contents| compress(contents, Level::BEST));
+#[ignore = "local single-run fbz bzip2 tar extraction overhead"]
+fn tbz2_fbz_overhead() {
+    fbz_overhead("tbz2", |contents| compress(contents, Level::BEST));
 }
 
 #[test]

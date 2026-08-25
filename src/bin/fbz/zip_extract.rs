@@ -10,7 +10,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use fastbz2::{DecodeOptions, DecodeProgress, Error, OutputSink, Result, WriterSink, deflate, gzip};
+use fbz::{DecodeOptions, DecodeProgress, Error, OutputSink, Result, WriterSink, deflate, gzip};
 use rayon::prelude::*;
 use zip::{CompressionMethod, ZipArchive, extra_fields::ExtraField};
 
@@ -301,7 +301,7 @@ where
     }
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
-        .thread_name(|index| format!("fastbz2-zip-{index}"))
+        .thread_name(|index| format!("fbz-zip-{index}"))
         .build()
         .map_err(|error| invalid(error.to_string()))?;
     pool.install(|| across.par_iter().try_for_each(|entry| run(entry, DecodeOptions { threads: 1, ..options })))

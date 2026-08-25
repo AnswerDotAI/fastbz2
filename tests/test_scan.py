@@ -2,7 +2,7 @@ import bz2
 
 import pytest
 
-from fastbz2 import bz2_crc32, scan
+from fbz import bz2_crc32, scan
 
 def combined_crc(blocks):
     crc = 0

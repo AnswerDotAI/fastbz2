@@ -38,6 +38,7 @@ pub enum Error {
     UnexpectedEof { bit_offset: u64, requested: u64, remaining: u64 },
     InvalidStreamHeader,
     InvalidGzip(String),
+    InvalidLz4(String),
     InvalidZip(String),
     Decode { bit_offset: u64, source: DecodeError },
     InvalidIndex(String),
@@ -57,9 +58,10 @@ impl fmt::Display for Error {
             }
             Self::InvalidStreamHeader => write!(f, "input does not start with a bzip2 BZh1-BZh9 header"),
             Self::InvalidGzip(message) => write!(f, "invalid gzip stream: {message}"),
+            Self::InvalidLz4(message) => write!(f, "invalid LZ4 frame: {message}"),
             Self::InvalidZip(message) => write!(f, "invalid ZIP archive: {message}"),
             Self::Decode { bit_offset, source } => write!(f, "bzip2 decode error at bit {bit_offset}: {source}"),
-            Self::InvalidIndex(message) => write!(f, "invalid fastbz2 index: {message}"),
+            Self::InvalidIndex(message) => write!(f, "invalid fbz index: {message}"),
             Self::InvalidConfiguration(message) => write!(f, "invalid configuration: {message}"),
             Self::Io(source) => source.fmt(f),
         }

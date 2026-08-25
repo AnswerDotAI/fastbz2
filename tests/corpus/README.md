@@ -15,4 +15,4 @@ its hot path for no realistic modern input.
 
 The uncompressed reference bytes are deliberately not stored. Tests decode
 valid inputs with the maintained pure-Rust `libbz2-rs-sys` implementation and
-compare `fastbz2` byte-for-byte with that differential oracle.
+compare `fbz` byte-for-byte with that differential oracle.

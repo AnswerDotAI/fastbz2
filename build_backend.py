@@ -4,7 +4,7 @@ from pathlib import Path
 import maturin
 
 def _stage_cli():
-    subprocess.run(["cargo", "build", "--release", "--bin", "fastbz2"], check=True)
+    subprocess.run(["cargo", "build", "--release", "--bin", "fbz"], check=True)
     subprocess.run([sys.executable, "tools/stage_binaries.py"], check=True)
 
 def build_wheel(wheel_directory, config_settings=None, metadata_directory=None):

@@ -1,21 +1,21 @@
 [package]
-name = "fastbz2"
+name = "fbz"
 version = "0.1.7"
 edition = "2024"
 rust-version = "1.91"
 license = "Apache-2.0"
-description = "Compression-format research workbench with fast bzip2, gzip, and ZIP decompression"
-repository = "https://github.com/AnswerDotAI/fastbz2"
-homepage = "https://github.com/AnswerDotAI/fastbz2"
-documentation = "https://github.com/AnswerDotAI/fastbz2"
+description = "Compression-format research workbench with fast bzip2, gzip, LZ4, and ZIP decompression"
+repository = "https://github.com/AnswerDotAI/fbz"
+homepage = "https://github.com/AnswerDotAI/fbz"
+documentation = "https://github.com/AnswerDotAI/fbz"
 
 [lib]
-name = "fastbz2"
+name = "fbz"
 crate-type = ["cdylib", "rlib"]
 
 [[bin]]
-name = "fastbz2"
-path = "src/bin/fastbz2.rs"
+name = "fbz"
+path = "src/bin/fbz.rs"
 test = false
 
 [profile.release]
@@ -33,6 +33,7 @@ rayon = "1.12.0"
 serde_json = "1.0.151"
 tempfile = "3.27.0"
 tar = { version = "0.4.46", default-features = false }
+twox-hash = { version = "2.0.0", default-features = false, features = ["xxhash32"] }
 zip = { version = "8.6.0", default-features = false }
 
 [dev-dependencies]
@@ -40,6 +41,7 @@ crabz2 = { version = "0.4.0", features = ["parallel"] }
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 libc = "0.2.175"
 libbz2-rs-sys = { version = "0.2.5", default-features = false, features = ["std"] }
+lz4_flex = "0.14.0"
 
 [features]
 python = ["dep:pyo3"]

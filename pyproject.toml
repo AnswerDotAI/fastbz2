@@ -4,9 +4,9 @@ build-backend = "build_backend"
 backend-path = ["."]
 
 [project]
-name = "fastbz2"
+name = "fbz"
 dynamic = ["version"]
-description = "Compression-format research workbench with fast bzip2 and gzip decompression"
+description = "Compression-format research workbench with fast bzip2, gzip, LZ4, and ZIP decompression"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.10"
 readme = "README.md"
@@ -20,14 +20,14 @@ classifiers = [
 dev = ["fastship>=0.0.11", "maturin>=1.0,<2.0", "pytest"]
 
 [project.urls]
-Homepage = "https://github.com/AnswerDotAI/fastbz2"
-Repository = "https://github.com/AnswerDotAI/fastbz2"
-Issues = "https://github.com/AnswerDotAI/fastbz2/issues"
+Homepage = "https://github.com/AnswerDotAI/fbz"
+Repository = "https://github.com/AnswerDotAI/fbz"
+Issues = "https://github.com/AnswerDotAI/fbz/issues"
 
 [tool.maturin]
 features = ["extension-module"]
 python-source = "python"
-module-name = "fastbz2._core"
+module-name = "fbz._core"
 data = "target/wheel-data"
 
 [tool.uv]

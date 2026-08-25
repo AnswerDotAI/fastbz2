@@ -8,6 +8,7 @@ use std::{
 
 use crabz2::{Level, compress};
 use flate2::{Compression, write::GzEncoder};
+use lz4_flex::frame::{BlockMode as Lz4BlockMode, BlockSize as Lz4BlockSize, FrameEncoder as Lz4Encoder, FrameInfo as Lz4FrameInfo};
 use zip::{CompressionMethod as ZipCompression, ZipArchive, ZipWriter, write::FullFileOptions};
 
 #[allow(dead_code)]
@@ -15,7 +16,7 @@ mod support;
 use support::{ZipMethod, zip_bytes, zip_with_modes};
 
 fn binary() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_fastbz2"))
+    Command::new(env!("CARGO_BIN_EXE_fbz"))
 }
 
 fn write_compressed(path: &Path, plain: &[u8]) {
@@ -30,6 +31,18 @@ fn gzip_bytes(plain: &[u8]) -> Vec<u8> {
 
 fn write_gzip(path: &Path, plain: &[u8]) {
     fs::write(path, gzip_bytes(plain)).unwrap();
+}
+
+fn lz4_bytes(plain: &[u8], mode: Lz4BlockMode) -> Vec<u8> {
+    let info = Lz4FrameInfo::new()
+        .block_size(Lz4BlockSize::Max64KB)
+        .block_mode(mode)
+        .block_checksums(true)
+        .content_checksum(true)
+        .content_size(Some(plain.len() as u64));
+    let mut encoder = Lz4Encoder::with_frame_info(info, Vec::new());
+    encoder.write_all(plain).unwrap();
+    encoder.finish().unwrap()
 }
 
 fn linked_zip() -> Vec<u8> {
@@ -359,6 +372,64 @@ fn gzip_magic_fallback_stdin_limits_and_corruption_work() {
     let rejected = binary().arg(input.to_str().unwrap()).output().unwrap();
     assert_eq!(rejected.status.code(), Some(3));
     assert!(!output.exists());
+}
+
+#[test]
+fn lz4_extension_magic_reporting_limits_and_corruption_work() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("sample.lz4");
+    let output = directory.path().join("sample");
+    let plain: Vec<_> = (0..2_000_000).map(|i| ((i * 31 + i / 97) & 255) as u8).collect();
+    let encoded = lz4_bytes(&plain, Lz4BlockMode::Independent);
+    fs::write(&input, &encoded).unwrap();
+
+    let decoded = binary().args(["-P", "4", input.to_str().unwrap()]).output().unwrap();
+    assert!(decoded.status.success(), "{}", String::from_utf8_lossy(&decoded.stderr));
+    assert_eq!(fs::read(&output).unwrap(), plain);
+
+    let tested = binary().args(["--test", "-P", "4", input.to_str().unwrap()]).output().unwrap();
+    assert!(tested.status.success());
+    let listed = binary().args(["--list", "--json", "-P", "4", input.to_str().unwrap()]).output().unwrap();
+    assert!(listed.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+    assert_eq!(value["format"], "lz4");
+    assert_eq!(value["decoded_bytes"], plain.len());
+    assert_eq!(value["frames"][0]["block_mode"], "independent");
+    assert!(value["blocks"].as_array().unwrap().len() > 1);
+
+    let magic_input = directory.path().join("mystery.data");
+    fs::write(&magic_input, &encoded).unwrap();
+    let magic_output = directory.path().join("mystery.data.out");
+    let magic = binary().args(["-P", "4", magic_input.to_str().unwrap()]).output().unwrap();
+    assert!(magic.status.success());
+    assert_eq!(fs::read(&magic_output).unwrap(), plain);
+
+    fs::remove_file(&output).unwrap();
+    let limited = binary().args(["--max-output", "1K", input.to_str().unwrap()]).output().unwrap();
+    assert_eq!(limited.status.code(), Some(3));
+    assert!(!output.exists());
+
+    let mut corrupt = encoded;
+    let last = corrupt.len() - 1;
+    corrupt[last] ^= 1;
+    fs::write(&input, corrupt).unwrap();
+    let rejected = binary().arg(input.to_str().unwrap()).output().unwrap();
+    assert_eq!(rejected.status.code(), Some(3));
+    assert!(!output.exists());
+}
+
+#[test]
+fn linked_tar_lz4_streams_through_the_shared_extractor() {
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("bundle.tar.lz4");
+    let output = directory.path().join("unpacked");
+    let plain_tar = tar_bytes(&[("first.txt", b"first"), ("nested/second.txt", b"second")]);
+    fs::write(&input, lz4_bytes(&plain_tar, Lz4BlockMode::Linked)).unwrap();
+
+    let extracted = binary().args(["-P", "4", "-C", output.to_str().unwrap(), input.to_str().unwrap()]).output().unwrap();
+    assert!(extracted.status.success(), "{}", String::from_utf8_lossy(&extracted.stderr));
+    assert_eq!(fs::read(output.join("first.txt")).unwrap(), b"first");
+    assert_eq!(fs::read(output.join("nested/second.txt")).unwrap(), b"second");
 }
 
 #[test]

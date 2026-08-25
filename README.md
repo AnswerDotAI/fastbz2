@@ -1,17 +1,17 @@
-# fastbz2
+# fbz
 
-An active compression-format research workbench with fast bzip2, gzip, and ZIP decompression plus safe tar extraction.
+**Faster, better zipper:** an active compression-format research workbench with fast bzip2, gzip, LZ4, and ZIP decompression plus safe tar extraction.
 
-`fastbz2` provides a native CLI, a Rust library, and a Python module. The CLI auto-selects bzip2, gzip, or ZIP handling from the filename extension, falling back to stream magic when needed. It streams compressed tar variants through a bounded extractor and adaptively parallelises ZIP work within or across entries. Every path validates decoded sizes and checksums. The bzip2 implementation also provides persistent random-access indexes.
+`fbz` provides a native CLI, a Rust library, and a Python module. The CLI auto-selects bzip2, gzip, LZ4, or ZIP handling from the filename extension, falling back to stream magic when needed. It streams compressed tar variants through a bounded extractor and adaptively parallelises ZIP work within or across entries. Every path validates decoded sizes and checksums. The bzip2 implementation also provides persistent random-access indexes.
 
-Compression is planned, but the current implementation decompresses bzip2 and gzip, extracts their tar-wrapped variants, and extracts stored or DEFLATE-compressed ZIP archives.
+Compression is planned as a separate whole-surface design. The current implementation only decompresses: bzip2, gzip and LZ4 frames; their tar-wrapped variants; and stored or DEFLATE-compressed ZIP archives.
 
 ## Install
 
-PyPI wheels contain both the Python module and the native `fastbz2` executable—there is no Python CLI wrapper:
+PyPI wheels contain both the Python module and the native `fbz` executable—there is no Python CLI wrapper:
 
 ```bash
-pip install fastbz2
+pip install fbz
 ```
 
 Python 3.10 and later are supported. Prebuilt wheels target Linux on x86-64 and ARM64, and macOS on ARM64. macOS Intel is best-effort and can build from source.
@@ -19,43 +19,46 @@ Python 3.10 and later are supported. Prebuilt wheels target Linux on x86-64 and 
 The Rust crate is not yet published separately on crates.io. Install the CLI from the repository, or add the library as a Git dependency:
 
 ```bash
-cargo install --git https://github.com/AnswerDotAI/fastbz2
-cargo add fastbz2 --git https://github.com/AnswerDotAI/fastbz2
+cargo install --git https://github.com/AnswerDotAI/fbz
+cargo add fbz --git https://github.com/AnswerDotAI/fbz
 ```
 
 ## CLI
 
-Decoding is the default operation. `.bz2`, `.bzip2`, `.gz`, and `.gzip` select their corresponding decoder and are removed from the output name. Compressed tar names—`.tar.bz2`, `.tar.bzip2`, `.tbz`, `.tbz2`, `.tar.gz`, `.tar.gzip`, and `.tgz`—and `.zip` automatically extract into the current directory or `-C/--output-dir`. `-x/--extract` forces archive extraction for stdin or an unusual filename; an explicit `-o/--output` instead writes a decoded tar stream, but is invalid for ZIP because ZIP has no single decoded byte stream. For stdin and unrecognised extensions, bzip2, gzip, or ZIP magic selects the format. Other non-archive input names gain `.out`.
+Decoding is the default operation. `.bz2`, `.bzip2`, `.gz`, `.gzip`, and `.lz4` select their corresponding decoder and are removed from the output name. Compressed tar names—`.tar.bz2`, `.tar.bzip2`, `.tbz`, `.tbz2`, `.tar.gz`, `.tar.gzip`, `.tgz`, and `.tar.lz4`—and `.zip` automatically extract into the current directory or `-C/--output-dir`. `-x/--extract` forces archive extraction for stdin or an unusual filename; an explicit `-o/--output` instead writes a decoded tar stream, but is invalid for ZIP because ZIP has no single decoded byte stream. For stdin and unrecognised extensions, bzip2, gzip, LZ4, or ZIP magic selects the format. Other non-archive input names gain `.out`.
 
 ```bash
-fastbz2 dump.xml.bz2                   # write dump.xml
-fastbz2 events.json.gz                 # write events.json
-fastbz2 source.tar.gz                  # extract into the current directory
-fastbz2 source.tbz2 -C unpacked        # extract into unpacked/
-fastbz2 dataset.zip -C unpacked         # extract ZIP entries adaptively in parallel
-fastbz2 --extract -C unpacked -        # extract tar or ZIP data from stdin
-fastbz2 source.tgz -o source.tar       # decode without extracting
-fastbz2 dump.xml.bz2 -o result.xml     # choose the decoded output path
-fastbz2 dump.xml.bz2 -o -              # write decoded bytes to stdout
+fbz dump.xml.bz2                   # write dump.xml
+fbz events.json.gz                 # write events.json
+fbz events.json.lz4                # write events.json
+fbz source.tar.gz                  # extract into the current directory
+fbz source.tar.lz4 -C unpacked     # stream-decode and extract
+fbz source.tbz2 -C unpacked        # extract into unpacked/
+fbz dataset.zip -C unpacked         # extract ZIP entries adaptively in parallel
+fbz --extract -C unpacked -        # extract tar or ZIP data from stdin
+fbz source.tgz -o source.tar       # decode without extracting
+fbz dump.xml.bz2 -o result.xml     # choose the decoded output path
+fbz dump.xml.bz2 -o -              # write decoded bytes to stdout
 ```
 
 Multiple inputs are processed in order, with parallelism applied inside each compressed stream. `-C/--output-dir` collects decoded files and is the extraction root for archives:
 
 ```bash
-fastbz2 data/*.bz2 logs/*.gz -C decoded
-fastbz2 data/*.bz2 logs/*.gz -C decoded --skip-existing
-fastbz2 backups/*.tgz -C restored
-fastbz2 datasets/*.zip -C restored
+fbz data/*.bz2 logs/*.gz -C decoded
+fbz data/*.bz2 logs/*.gz -C decoded --skip-existing
+fbz backups/*.tgz -C restored
+fbz datasets/*.zip -C restored
 ```
 
 Validation and inspection remain flags rather than subcommands:
 
 ```bash
-fastbz2 --test dump.xml.bz2          # fully decode and validate, writing nothing
-fastbz2 --index dump.xml.bz2         # write dump.xml.bz2.fbz2i (bzip2 only)
-fastbz2 --list events.json.gz        # print the validated member/block layout
-fastbz2 --list dataset.zip           # print the validated entry layout
-fastbz2 --list --json dump.xml.bz2   # emit the complete layout as JSON
+fbz --test dump.xml.bz2          # fully decode and validate, writing nothing
+fbz --index dump.xml.bz2         # write dump.xml.bz2.fbz2i (bzip2 only)
+fbz --list events.json.gz        # print the validated member/block layout
+fbz --list events.json.lz4       # print the validated frame/block layout
+fbz --list dataset.zip           # print the validated entry layout
+fbz --list --json dump.xml.bz2   # emit the complete layout as JSON
 ```
 
 `--test`, `--index`, `--list`, and explicit `--extract` are mutually exclusive. Human-readable `--list` output labels each input when given multiple files; JSON output is one object for one input and an array for multiple inputs.
@@ -71,7 +74,7 @@ fastbz2 --list --json dump.xml.bz2   # emit the complete layout as JSON
 
 Long interactive operations report completion, decoded throughput, compression ratio, and ETA on stderr. Progress is disabled automatically when stderr is redirected; `-q/--quiet` also suppresses progress and skip notices.
 
-`-P/--threads 0`, the default, uses the machine's available parallelism; an explicit positive value is honoured by every decoder. `--memory-limit` bounds speculative output in the shared scheduler and defaults to `1G`. Gzip uses parallel dynamic-block discovery only when the input and memory budget can amortize it. ZIP uses one level of parallelism at a time: large entries use the parallel DEFLATE engine, while archives of ordinary entries decode files concurrently without nested worker pools.
+`-P/--threads 0`, the default, uses the machine's available parallelism; an explicit positive value is honoured by every decoder. `--memory-limit` bounds speculative output in the shared scheduler and defaults to `1G`. Gzip uses parallel dynamic-block discovery only when the input and memory budget can amortize it. LZ4 frames with independent blocks decode those blocks concurrently and commit them in order; automatic LZ4 decoding caps this memory-bandwidth-bound work at four workers, while explicit `-P` values remain unchanged. Linked-block frames decode serially because each block depends on the preceding 64 KiB history. ZIP uses one level of parallelism at a time: large entries use the parallel DEFLATE engine, while archives of ordinary entries decode files concurrently without nested worker pools.
 
 ## Python
 
@@ -80,24 +83,24 @@ The Python API currently exposes the bzip2 backend. Unified Python dispatch will
 ### One-shot decompression and validation
 
 ```python
-import fastbz2
+import fbz
 
-plain = fastbz2.decompress(compressed_bytes)
-fastbz2.test("dump.xml.bz2")  # returns None after successful validation
+plain = fbz.decompress(compressed_bytes)
+fbz.test("dump.xml.bz2")  # returns None after successful validation
 ```
 
 `decompress` accepts a bytes-like object and returns `bytes`. `test` accepts either compressed bytes or a path and avoids retaining the decoded result.
 
 ### Seekable reads and persistent indexes
 
-`fastbz2.open` returns a seekable binary `io.RawIOBase`. Opening without an index performs a complete validation pass and builds an in-memory block index; `build_index` can persist that work for later processes:
+`fbz.open` returns a seekable binary `io.RawIOBase`. Opening without an index performs a complete validation pass and builds an in-memory block index; `build_index` can persist that work for later processes:
 
 ```python
-import fastbz2
+import fbz
 
-fastbz2.build_index("dump.xml.bz2", "dump.xml.bz2.fbz2i")
+fbz.build_index("dump.xml.bz2", "dump.xml.bz2.fbz2i")
 
-with fastbz2.open("dump.xml.bz2", index="dump.xml.bz2.fbz2i") as f:
+with fbz.open("dump.xml.bz2", index="dump.xml.bz2.fbz2i") as f:
     f.seek(1_000_000_000)
     chunk = f.read(64 * 1024)
     print(f.tell(), f.size)
@@ -111,7 +114,7 @@ Building an index fully decodes into a sink but does not write or retain the pla
 
 ```python
 import bz2
-from fastbz2 import scan
+from fbz import scan
 
 result = scan(bz2.compress(b"hello"))
 assert result.blocks[0].bit_offset == 32
@@ -124,9 +127,9 @@ Scan results are deliberately untrusted candidates. Use `test`, `decompress`, `b
 The streaming API accepts any `Write` destination and uses the serial fast path when `threads` is one:
 
 ```rust
-use fastbz2::{DecodeOptions, Source, decompress_to_writer};
+use fbz::{DecodeOptions, Source, decompress_to_writer};
 
-fn main() -> fastbz2::Result<()> {
+fn main() -> fbz::Result<()> {
     let source = Source::open("dump.xml.bz2")?;
     let mut output = std::io::stdout().lock();
     decompress_to_writer(source.as_slice(), &mut output, DecodeOptions::default())?;
@@ -139,35 +142,59 @@ fn main() -> fastbz2::Result<()> {
 The in-repo gzip decoder is available separately so callers can choose explicitly:
 
 ```rust
-let plain = fastbz2::gzip::decompress(&compressed_gzip)?;
+let plain = fbz::gzip::decompress(&compressed_gzip)?;
 ```
 
 `gzip::decompress_to_writer` and `gzip::decompress_to_writer_with_options` return a validated report containing gzip member metadata, each DEFLATE block's kind and ranges, and counts of accepted speculative and serial-fallback chunks. They support stored, fixed-Huffman, and dynamic-Huffman blocks, optional gzip headers, and concatenated members.
 
-The raw shared codec is available as `fastbz2::deflate::decompress_to_sink_with_options_and_progress`; gzip framing and ZIP extraction both use this exact decoder.
+The raw shared codec is available as `fbz::deflate::decompress_to_sink_with_options_and_progress`; gzip framing and ZIP extraction both use this exact decoder.
+
+The in-repo LZ4 frame decoder has the same one-shot, writer, options, progress, and report shapes as gzip:
+
+```rust
+let plain = fbz::lz4::decompress(&compressed_lz4)?;
+```
+
+It accepts standard independent or linked blocks, stored blocks, all four standard block maxima, optional block/content checksums and sizes, concatenated frames, and skippable frames. External dictionaries and the obsolete legacy frame format are intentionally unsupported.
 
 ## Performance
 
-These are single local release-mode CLI runs on the primary 18-core Apple Silicon development machine. The gzip comparison warms each executable with the 5% fixture, then measures exactly one full validation run; peak physical footprint comes from a separate sampled run because process inspection can perturb such a short workload. ZIP likewise warms each CLI once and then measures one extraction. These are observations rather than statistical aggregates. In-process codec and library-oracle comparisons live in [DEV.md](DEV.md#local-wikipedia-benchmarks), not this user-facing table.
+These are single local release-mode CLI runs on the primary Apple Silicon development machine. The gzip comparison warms each executable with the 5% fixture, then measures exactly one full validation run; peak physical footprint comes from a separate sampled run because process inspection can perturb such a short workload. ZIP and tar likewise warm each CLI once and then measure one extraction. The LZ4 comparison uses its automatic four-worker limit. These are observations rather than statistical aggregates. In-process codec and library-oracle comparisons live in [DEV.md](DEV.md), not this user-facing section.
 
 Full SimpleWiki recompressed with system `gzip -6` (`438,904,466` bytes compressed, `1,688,460,257` bytes decoded):
 
 | CLI | Mode | Seconds | Peak physical footprint |
 |---|---|---:|---:|
 | rapidgzip-rust, local checkout | auto parallel, `--test` | 0.363 | 460.0 MiB |
-| fastbz2 | auto parallel, `--test` | 0.326 | 335.9 MiB |
+| fbz | auto parallel, `--test` | 0.326 | 335.9 MiB |
 | Apple gzip | serial, stdout discarded | 1.371 | 1.2 MiB |
 
-The memory values use macOS physical footprint rather than `ru_maxrss`. The fastbz2 CLI memory-maps its 419 MiB input, so clean reclaimable file pages make RSS look roughly 419 MiB larger; `pread`-based tools leave the same cached pages outside process RSS. Physical footprint makes the comparison meaningful.
+The memory values use macOS physical footprint rather than `ru_maxrss`. The fbz CLI memory-maps its 419 MiB input, so clean reclaimable file pages make RSS look roughly 419 MiB larger; `pread`-based tools leave the same cached pages outside process RSS. Physical footprint makes the comparison meaningful.
 
 ZIPs containing the same 80.5 MiB SimpleWiki prefix (`25.8 MiB` compressed), after one untimed warm-up per executable:
 
-| Shape | fastbz2, auto parallel | Info-ZIP unzip 6.00 (Apple) | Speedup |
+| Shape | fbz, auto parallel | Info-ZIP unzip 6.00 (Apple) | Speedup |
 |---|---:|---:|---:|
 | One DEFLATE entry | 35.571 ms | 355.235 ms | 10.0x |
 | 18 DEFLATE entries | 29.700 ms | 360.008 ms | 12.1x |
 
-The many-entry sampled run used 36.7 MiB physical footprint for fastbz2 versus 2.4 MiB for `unzip`; its 18-way file parallelism deliberately spends modest memory to obtain the throughput above. Both fastbz2 rows used automatic thread selection, which resolved to 18 available cores on this machine.
+The many-entry sampled run used 36.7 MiB physical footprint for fbz versus 2.4 MiB for `unzip`; its 18-way file parallelism deliberately spends modest memory to obtain the throughput above. Both fbz rows used automatic thread selection, which resolved to 18 available cores on this machine.
+
+Compressed tar archives containing the same 80.5 MiB prefix, after one untimed warm-up per CLI:
+
+| Format | fbz extraction | System `tar` | Speedup |
+|---|---:|---:|---:|
+| `.tgz` | 56.850 ms | 117.962 ms | 2.1x |
+| `.tar.bz2` | 151.783 ms | 1.168 s | 7.7x |
+
+The same 80.5 MiB prefix in a standard independent-block LZ4 frame (`40.2 MiB` compressed), after one untimed warm-up per executable:
+
+| CLI | Milliseconds | Peak RSS | fbz/reference |
+|---|---:|---:|---:|
+| fbz, auto (4 workers) | 51.188 | 71.0 MiB | 0.944x |
+| Homebrew `lz4` 1.10.0 | 54.228 | 32.0 MiB | — |
+
+The larger fbz RSS includes its memory-mapped 40.2 MiB source plus bounded in-flight decoded blocks; it does not grow with decoded file size. Testing higher worker counts showed no meaningful throughput gain and raised RSS, so automatic LZ4 decoding stops at four workers; `-P` remains an explicit override.
 
 Homebrew `pbzip2` 1.1.13 could not safely decompress the complete 26,668,484,995-byte English Wikipedia multistream dump on this machine. It segfaulted, and repeated attempts produced divergent and truncated plaintext. Successful smaller-file results therefore do not establish full-file reliability.
 
@@ -175,25 +202,28 @@ Homebrew `pbzip2` 1.1.13 could not safely decompress the complete 26,668,484,995
 
 The production codec logic is portable Rust. The bzip2 decoder uses a tuned 4096-entry Huffman lookup table for codes up to 12 bits and canonical fallback for longer codes. A structural scan finds possible non-byte-aligned block markers; these remain speculative until ordered decoding establishes the exact stream chain and validates all block and combined-stream CRCs. A rolling scheduler keeps workers busy across concatenated streams while bounding decoded results awaiting validation.
 
-The gzip backend implements RFC 1952 framing and DEFLATE directly in this repository. For sufficiently large dynamic-Huffman inputs it discovers independently decodable boundaries, decodes speculative chunks through the shared byte-budgeted scheduler, and represents unknown predecessor bytes as compact markers. The ordered coordinator resolves only the suffix needed to derive the next 32 KiB history window; full marker resolution and per-chunk CRC run as priority work on the same staged worker queue, and CRCs are combined in order. Once a chunk has a marker-free window, the same decoder switches its remaining output from `u16` markers to ordinary bytes. Small, stored-heavy, fixed-heavy, one-thread, and low-memory inputs use the serial path; concatenated members may independently choose either path. FHCRC, CRC32, and ISIZE are always validated. ZIP reuses that raw DEFLATE core and uses the mature `zip` crate only for container structure and metadata. It supports stored and DEFLATE entries, Zip64, streaming data descriptors, Unix symlinks/modes, and Unix/NTFS modification-time fields; encryption and uncommon legacy compression methods are intentionally unsupported. `crc32fast` is the only production codec helper; `flate2` is dev-only.
+The gzip backend implements RFC 1952 framing and DEFLATE directly in this repository. For sufficiently large dynamic-Huffman inputs it discovers independently decodable boundaries, decodes speculative chunks through the shared byte-budgeted scheduler, and represents unknown predecessor bytes as compact markers. The ordered coordinator resolves only the suffix needed to derive the next 32 KiB history window; full marker resolution and per-chunk CRC run as priority work on the same staged worker queue, and CRCs are combined in order. Once a chunk has a marker-free window, the same decoder switches its remaining output from `u16` markers to ordinary bytes. Small, stored-heavy, fixed-heavy, one-thread, and low-memory inputs use the serial path; concatenated members may independently choose either path. FHCRC, CRC32, and ISIZE are always validated. LZ4 framing and block decoding are likewise implemented in safe Rust. Independent blocks use the same ordered, byte-budgeted scheduler as bzip2; linked blocks retain only the preceding 64 KiB window. LZ4 and DEFLATE share one optimized overlapping back-reference expansion primitive. Header, block, and content XXH32 checksums are validated where present. ZIP reuses the raw DEFLATE core and uses the mature `zip` crate only for container structure and metadata. It supports stored and DEFLATE entries, Zip64, streaming data descriptors, Unix symlinks/modes, and Unix/NTFS modification-time fields; encryption and uncommon legacy compression methods are intentionally unsupported. `crc32fast` and `twox-hash` are the production checksum helpers; `flate2` and `lz4_flex` are dev-only differential oracles.
 
 Legacy randomized blocks generated by bzip2 releases before 0.9.5 are intentionally unsupported. Normal `BZh1` through `BZh9` streams and concatenated streams are supported.
 
 ## Research lineage and credits
 
-The gzip work builds on Maximilian Knespel and Holger Brunst's HPDC '23 paper, [*Rapidgzip: Parallel Decompression and Seeking in Gzip Files Using Cache Prefetching*](https://doi.org/10.1145/3588195.3592992). In particular, fastbz2 adapts its central idea of starting DEFLATE decoding without the preceding 32 KiB window, representing uncertain output until the true history becomes available, and committing independently decoded chunks in order.
+The gzip work builds on Maximilian Knespel and Holger Brunst's HPDC '23 paper, [*Rapidgzip: Parallel Decompression and Seeking in Gzip Files Using Cache Prefetching*](https://doi.org/10.1145/3588195.3592992). In particular, fbz adapts its central idea of starting DEFLATE decoding without the preceding 32 KiB window, representing uncertain output until the true history becomes available, and committing independently decoded chunks in order.
 
 The open-source implementations and codebases consulted were:
 
 - [`rapidgzip`](https://github.com/mxmlnkn/rapidgzip), the C++ implementation described by the paper.
-- [`rapidgzip-rust`](https://github.com/COMBINE-lab/rapidgzip-rust), a pure-Rust reimplementation and fastbz2's local gzip performance and memory reference.
+- [`rapidgzip-rust`](https://github.com/COMBINE-lab/rapidgzip-rust), a pure-Rust reimplementation and fbz's local gzip performance and memory reference.
 - [`librapidarchive`](https://github.com/mxmlnkn/librapidarchive), an experimental shared architecture for parallel bzip2 and gzip access.
 - [`indexed_bzip2`](https://github.com/mxmlnkn/indexed_bzip2), for non-byte-aligned marker scanning, independent bzip2 block decoding, ordered prefetch, and indexed seeking.
 - [`zip`](https://github.com/zip-rs/zip2), used without codec features for maintained ZIP structure and metadata handling.
-- Rob Landley's 0BSD [`bzcat` implementation in Toybox](https://github.com/landley/toybox), from which fastbz2's specialised bzip2 decoder is derived.
+- [`LZ4`](https://github.com/lz4/lz4), the reference format and Homebrew CLI performance baseline.
+- [`lz4_flex`](https://github.com/pseitz/lz4_flex), used dev-only to generate a broad interoperability matrix and benchmark frames.
+- [`lz4-rs`](https://github.com/bozaro/lz4-rs), consulted as a second local implementation reference.
+- Rob Landley's 0BSD [`bzcat` implementation in Toybox](https://github.com/landley/toybox), from which fbz's specialised bzip2 decoder is derived.
 
 ## Development
 
 [DEV.md](DEV.md) documents the architecture, test strategy, benchmark fixture generation, build commands, and release process.
 
-`fastbz2` is licensed under the [Apache License 2.0](LICENSE).
+`fbz` is licensed under the [Apache License 2.0](LICENSE).
