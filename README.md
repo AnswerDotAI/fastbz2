@@ -1,10 +1,25 @@
 # fbz
 
-**Faster, better zipper:** an active compression-format research workbench with fast bzip2, gzip, LZ4, and ZIP decompression plus safe tar extraction.
+**Fast, reliable parallel decompression.**
 
-`fbz` provides a native CLI, a Rust library, and a Python module. The CLI auto-selects bzip2, gzip, LZ4, or ZIP handling from the filename extension, falling back to stream magic when needed. It streams compressed tar variants through a bounded extractor and adaptively parallelises ZIP work within or across entries. Every path validates decoded sizes and checksums. The bzip2 implementation also provides persistent random-access indexes.
+`fbz` is one decompression CLI for bzip2, gzip, LZ4, ZIP, and compressed tar archives. It selects the format automatically, uses the available CPU cores, validates every stream, and safely extracts archives. The same engine is available as a Rust crate and Python module.
 
-Compression is planned as a separate whole-surface design. The current implementation only decompresses: bzip2, gzip and LZ4 frames; their tar-wrapped variants; and stored or DEFLATE-compressed ZIP archives.
+`fbz` was created because we found existing tools tended to be too slow (as the benchmarks below show) or too unreliable (e.g `pbzip2` 1.1.13 fails to decompress the full English Wikipedia archive). And we wanted a single tool we could use for all common formats with a single CLI interface.
+
+## Performance
+
+The same 80.5 MiB SimpleWiki XML payload is used in every row with automatic thread selection. Stream formats are fully decoded and validated without writing output; archives are extracted. Each CLI is warmed once, then measured once on the primary Apple Silicon development machine.
+
+| Format | `fbz` | Familiar tool | Speedup |
+|---|---:|---:|---:|
+| `.bz2` | 163 ms | `bzip2`: 1.17 s | 7.2x |
+| `.tar.bz2` | 152 ms | `tar`: 1.17 s | 7.7x |
+| `.zip` (18 files) | 30 ms | `unzip`: 360 ms | 12x |
+| `.gz` | 31 ms | `gzip`: 76 ms | 2.5x |
+| `.tar.gz` | 57 ms | `tar`: 118 ms | 2.1x |
+| `.lz4` | 55 ms | `lz4`: 56 ms | 1.0x |
+
+See [Benchmarking details](#benchmarking-details) for the details.
 
 ## Install
 
@@ -62,19 +77,6 @@ fbz --list --json dump.xml.bz2   # emit the complete layout as JSON
 ```
 
 `--test`, `--index`, `--list`, and explicit `--extract` are mutually exclusive. Human-readable `--list` output labels each input when given multiple files; JSON output is one object for one input and an array for multiple inputs.
-
-### Output safety
-
-- Existing decoded files and archive entries are rejected by default. `--force` replaces them; `--skip-existing` applies to decoded files rather than archives.
-- Decoded-file outputs use a same-directory temporary file and become visible atomically only after successful checksum validation.
-- Tar entries stream into a same-filesystem staging directory through a bounded pipe. ZIP entries decode directly into the same staging scheme. Entries are preflighted and moved into the destination only after every relevant compression stream and archive structure validates, so a late CRC failure leaves no extracted files.
-- Tar and ZIP paths and link targets are confined to the destination. ZIP rejects unsafe or duplicate paths; tar safely skips unsafe entries. New entries use the archive's permissions and modification times where provided. Standalone decoded files inherit those values from the compressed input.
-- `--rm` removes each compressed input only after its decoded file or all archive entries have been committed successfully.
-- `--max-output SIZE` limits decoded bytes per input, including tar framing and padding. Sizes accept binary suffixes such as `K`, `MiB`, and `G`.
-
-Long interactive operations report completion, decoded throughput, compression ratio, and ETA on stderr. Progress is disabled automatically when stderr is redirected; `-q/--quiet` also suppresses progress and skip notices.
-
-`-P/--threads 0`, the default, uses the machine's available parallelism; an explicit positive value is honoured by every decoder. `--memory-limit` bounds speculative output in the shared scheduler and defaults to `1G`. Gzip uses parallel dynamic-block discovery only when the input and memory budget can amortize it. LZ4 frames with independent blocks decode those blocks concurrently and commit them in order; automatic LZ4 decoding caps this memory-bandwidth-bound work at four workers, while explicit `-P` values remain unchanged. Linked-block frames decode serially because each block depends on the preceding 64 KiB history. ZIP uses one level of parallelism at a time: large entries use the parallel DEFLATE engine, while archives of ordinary entries decode files concurrently without nested worker pools.
 
 ## Python
 
@@ -178,46 +180,30 @@ Magic takes priority over the filename extension, with the extension used as a f
 
 Checksum errors discovered after output has begun are returned by a later `read()` call. Therefore only successful EOF establishes that the complete stream was valid; dropping early deliberately does not finish validation. Compressed tar inputs yield the decoded tar byte stream rather than extracting it. ZIP is not exposed through `Reader` because an archive has no single decoded byte stream.
 
-## Performance
+## CLI output safety
 
-These are single local release-mode CLI runs on the primary Apple Silicon development machine. The gzip comparison warms each executable with the 5% fixture, then measures exactly one full validation run; peak physical footprint comes from a separate sampled run because process inspection can perturb such a short workload. ZIP and tar likewise warm each CLI once and then measure one extraction. The LZ4 comparison uses its automatic four-worker limit. These are observations rather than statistical aggregates. In-process codec and library-oracle comparisons live in [DEV.md](DEV.md), not this user-facing section.
+- Existing decoded files and archive entries are rejected by default. `--force` replaces them; `--skip-existing` applies to decoded files rather than archives.
+- Decoded-file outputs use a same-directory temporary file and become visible atomically only after successful checksum validation.
+- Tar entries stream into a same-filesystem staging directory through a bounded pipe. ZIP entries decode directly into the same staging scheme. Entries are preflighted and moved into the destination only after every relevant compression stream and archive structure validates, so a late CRC failure leaves no extracted files.
+- Tar and ZIP paths and link targets are confined to the destination. ZIP rejects unsafe or duplicate paths; tar safely skips unsafe entries. New entries use the archive's permissions and modification times where provided. Standalone decoded files inherit those values from the compressed input.
+- `--rm` removes each compressed input only after its decoded file or all archive entries have been committed successfully.
+- `--max-output SIZE` limits decoded bytes per input, including tar framing and padding. Sizes accept binary suffixes such as `K`, `MiB`, and `G`.
 
-Full SimpleWiki recompressed with system `gzip -6` (`438,904,466` bytes compressed, `1,688,460,257` bytes decoded):
+Long interactive operations report completion, decoded throughput, compression ratio, and ETA on stderr. Progress is disabled automatically when stderr is redirected; `-q/--quiet` also suppresses progress and skip notices.
 
-| CLI | Mode | Seconds | Peak physical footprint |
-|---|---|---:|---:|
-| rapidgzip-rust, local checkout | auto parallel, `--test` | 0.363 | 460.0 MiB |
-| fbz | auto parallel, `--test` | 0.326 | 335.9 MiB |
-| Apple gzip | serial, stdout discarded | 1.371 | 1.2 MiB |
+`-P/--threads 0`, the default, uses the machine's available parallelism; an explicit positive value is honoured by every decoder. `--memory-limit` bounds speculative output in the shared scheduler and defaults to `1G`. Gzip uses parallel dynamic-block discovery only when the input and memory budget can amortize it. LZ4 frames with independent blocks decode those blocks concurrently and commit them in order; automatic LZ4 decoding caps this memory-bandwidth-bound work at four workers, while explicit `-P` values remain unchanged. Linked-block frames decode serially because each block depends on the preceding 64 KiB history. ZIP uses one level of parallelism at a time: large entries use the parallel DEFLATE engine, while archives of ordinary entries decode files concurrently without nested worker pools.
 
-The memory values use macOS physical footprint rather than `ru_maxrss`. The fbz CLI memory-maps its 419 MiB input, so clean reclaimable file pages make RSS look roughly 419 MiB larger; `pread`-based tools leave the same cached pages outside process RSS. Physical footprint makes the comparison meaningful.
+## Benchmarking details
 
-ZIPs containing the same 80.5 MiB SimpleWiki prefix (`25.8 MiB` compressed), after one untimed warm-up per executable:
+The headline benchmark uses the first 84,423,012 decoded bytes of SimpleWiki for every format. The standalone bzip2 and gzip rows run each tool's validation mode. The ZIP row extracts 18 equal-sized files, while the compressed-tar rows extract one file; each archive comparison performs the same work on both sides. LZ4 uses `fbz`'s automatic four-worker limit. All results are single local release-mode observations after one untimed warm-up, not statistical aggregates.
 
-| Shape | fbz, auto parallel | Info-ZIP unzip 6.00 (Apple) | Speedup |
-|---|---:|---:|---:|
-| One DEFLATE entry | 35.571 ms | 355.235 ms | 10.0x |
-| 18 DEFLATE entries | 29.700 ms | 360.008 ms | 12.1x |
+The familiar reference CLIs are the system `bzip2`, `gzip`, and `tar`; Apple Info-ZIP `unzip` 6.00; and Homebrew `lz4` 1.10.0. The detailed fixture-generation and single-run commands live in [DEV.md](DEV.md), alongside in-process codec comparisons and separate memory diagnostics.
 
-The many-entry sampled run used 36.7 MiB physical footprint for fbz versus 2.4 MiB for `unzip`; its 18-way file parallelism deliberately spends modest memory to obtain the throughput above. Both fbz rows used automatic thread selection, which resolved to 18 available cores on this machine.
+On the complete 1.57 GiB SimpleWiki XML recompressed with system `gzip -6`, `fbz` validated the stream in 0.33 seconds, compared with 0.36 seconds for a local `rapidgzip-rust` checkout and 1.37 seconds for Apple `gzip`. This larger result is kept here because it exercises sustained parallel gzip decoding; it is not mixed into the common-payload headline table.
 
-Compressed tar archives containing the same 80.5 MiB prefix, after one untimed warm-up per CLI:
+### Reliability on large inputs
 
-| Format | fbz extraction | System `tar` | Speedup |
-|---|---:|---:|---:|
-| `.tgz` | 56.850 ms | 117.962 ms | 2.1x |
-| `.tar.bz2` | 151.783 ms | 1.168 s | 7.7x |
-
-The same 80.5 MiB prefix in a standard independent-block LZ4 frame (`40.2 MiB` compressed), after one untimed warm-up per executable:
-
-| CLI | Milliseconds | Peak RSS | fbz/reference |
-|---|---:|---:|---:|
-| fbz, auto (4 workers) | 55.313 | 58.9 MiB | 0.996x |
-| Homebrew `lz4` 1.10.0 | 55.537 | 32.0 MiB | — |
-
-The larger fbz RSS includes its memory-mapped 40.2 MiB source plus bounded in-flight decoded blocks; it does not grow with decoded file size. Testing higher worker counts showed no meaningful throughput gain and raised RSS, so automatic LZ4 decoding stops at four workers; `-P` remains an explicit override.
-
-Homebrew `pbzip2` 1.1.13 could not safely decompress the complete 26,668,484,995-byte English Wikipedia multistream dump on this machine. It segfaulted, and repeated attempts produced divergent and truncated plaintext. Successful smaller-file results therefore do not establish full-file reliability.
+Homebrew `pbzip2` 1.1.13 could not safely decompress the complete 26,668,484,995-byte English Wikipedia multistream dump on this machine. It segfaulted, and repeated attempts produced divergent and truncated plaintext. Successful smaller-file benchmark results therefore do not establish full-file reliability, which is why `fbz` treats structural and checksum validation as part of decompression.
 
 ## Implementation and compatibility
 

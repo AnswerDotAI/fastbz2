@@ -79,6 +79,17 @@ The normal release test path decodes selected valid and corrupt cases from the m
 
 The normal release path contains warmed end-to-end performance regression gates capped at 1.3 times each oracle, allowing for noise on shared runners. The gzip gates independently exercise a highly compressible LZ77-heavy shape and an incompressible literal-heavy shape against `flate2`; the bzip2 gate uses `libbz2-rs-sys`. Representative local acceptance remains 1.2 times the corresponding oracle. The ignored full-wiki gzip test applies that threshold to rapidgzip-rust. Keep the whole release test suite below five seconds on the primary development laptop; individual timed workloads should normally be about 0.1 seconds or less.
 
+### Local standalone CLI comparisons
+
+`tests/stream_cli_perf.rs` reproduces the standalone bzip2 and gzip rows in the README using the common 84,423,012-byte SimpleWiki prefix. Each test fully validates one format with `fbz` and its system CLI, warming each executable once before exactly one measured run:
+
+```bash
+cargo test --release --test stream_cli_perf bzip2_cli_comparison -- --ignored --exact --nocapture
+cargo test --release --test stream_cli_perf gzip_cli_comparison -- --ignored --exact --nocapture
+```
+
+Regenerate both compressed inputs with the shared instructions in [Local Wikipedia benchmarks](#local-wikipedia-benchmarks). Run the tests separately so their parallel decoders do not compete for the same cores. User-facing results belong only in the README; this section records reproduction rather than a duplicate table.
+
 ### Local Reader benchmark
 
 `tests/reader_perf.rs` compares the public `Read` adapter with the direct writer path on 84.4 MiB SimpleWiki inputs. Each row is one release-mode run, and both timings include opening the file. The Reader path necessarily copies into the caller's buffer but transfers decoder-owned chunks into its rendezvous pipe without another copy. The LZ4 test builds its frame before timing:
