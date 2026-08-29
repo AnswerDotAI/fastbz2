@@ -14,13 +14,9 @@ use zip::{CompressionMethod as ZipCompression, ZipArchive, ZipWriter, write::Ful
 mod support;
 use support::{ZipMethod, zip_bytes, zip_with_modes};
 
-fn binary() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_fbz"))
-}
+fn binary() -> Command { Command::new(env!("CARGO_BIN_EXE_fbz")) }
 
-fn write_compressed(path: &Path, plain: &[u8]) {
-    fs::write(path, compress(plain, Level::FASTEST)).unwrap();
-}
+fn write_compressed(path: &Path, plain: &[u8]) { fs::write(path, compress(plain, Level::FASTEST)).unwrap(); }
 
 fn gzip_bytes(plain: &[u8]) -> Vec<u8> {
     let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
@@ -28,9 +24,7 @@ fn gzip_bytes(plain: &[u8]) -> Vec<u8> {
     encoder.finish().unwrap()
 }
 
-fn write_gzip(path: &Path, plain: &[u8]) {
-    fs::write(path, gzip_bytes(plain)).unwrap();
-}
+fn write_gzip(path: &Path, plain: &[u8]) { fs::write(path, gzip_bytes(plain)).unwrap(); }
 
 fn lz4_bytes(plain: &[u8], mode: Lz4BlockMode) -> Vec<u8> {
     let info = Lz4FrameInfo::new()
@@ -80,9 +74,7 @@ fn tar_bytes(entries: &[(&str, &[u8])]) -> Vec<u8> {
     archive
 }
 
-fn write_tgz(path: &Path, entries: &[(&str, &[u8])]) {
-    write_gzip(path, &tar_bytes(entries));
-}
+fn write_tgz(path: &Path, entries: &[(&str, &[u8])]) { write_gzip(path, &tar_bytes(entries)); }
 
 #[test]
 fn gzip_compression_infers_format_and_interoperates() {
@@ -762,9 +754,7 @@ fn zip_stored_deflate_limits_corruption_and_paths_are_atomic() {
 
     let mut traversal = zip_bytes(&[("aa/x.txt", b"outside", ZipMethod::Deflate)]);
     for offset in 0..=traversal.len() - b"aa/x.txt".len() {
-        if &traversal[offset..offset + b"aa/x.txt".len()] == b"aa/x.txt" {
-            traversal[offset..offset + b"../x.txt".len()].copy_from_slice(b"../x.txt");
-        }
+        if &traversal[offset..offset + b"aa/x.txt".len()] == b"aa/x.txt" { traversal[offset..offset + b"../x.txt".len()].copy_from_slice(b"../x.txt"); }
     }
     fs::write(&input, traversal).unwrap();
     let traversal_output = directory.path().join("traversal-output");
@@ -789,9 +779,7 @@ fn zip64_and_streaming_data_descriptors_use_the_same_extractor() {
 
 #[test]
 fn zip_rejects_encryption_unsupported_methods_and_duplicate_paths() {
-    fn header(archive: &[u8], signature: &[u8; 4]) -> usize {
-        archive.windows(signature.len()).position(|bytes| bytes == signature).unwrap()
-    }
+    fn header(archive: &[u8], signature: &[u8; 4]) -> usize { archive.windows(signature.len()).position(|bytes| bytes == signature).unwrap() }
     fn rejected(directory: &Path, name: &str, archive: &[u8], expected: &str) {
         let input = directory.join(name);
         fs::write(&input, archive).unwrap();

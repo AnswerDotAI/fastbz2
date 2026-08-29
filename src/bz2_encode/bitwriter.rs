@@ -5,20 +5,12 @@
 use std::vec::Vec;
 
 /// Accumulates bits most-significant-first into a byte buffer.
-pub struct BitWriter {
-    out: Vec<u8>,
-    acc: u64,
-    nbits: u32,
-}
+pub struct BitWriter { out: Vec<u8>, acc: u64, nbits: u32 }
 
 impl BitWriter {
-    pub fn new() -> Self {
-        BitWriter { out: Vec::new(), acc: 0, nbits: 0 }
-    }
+    pub fn new() -> Self { BitWriter { out: Vec::new(), acc: 0, nbits: 0 } }
 
-    pub fn with_capacity(cap: usize) -> Self {
-        BitWriter { out: Vec::with_capacity(cap), acc: 0, nbits: 0 }
-    }
+    pub fn with_capacity(cap: usize) -> Self { BitWriter { out: Vec::with_capacity(cap), acc: 0, nbits: 0 } }
 
     /// Write the low `n` bits of `val`, most significant first. `n <= 32`.
     #[inline]
@@ -35,9 +27,7 @@ impl BitWriter {
     }
 
     #[inline]
-    pub fn write_bit(&mut self, bit: u32) {
-        self.write_bits(1, bit);
-    }
+    pub fn write_bit(&mut self, bit: u32) { self.write_bits(1, bit); }
 
     /// Write a 48-bit block or end-of-stream magic.
     pub fn write_magic(&mut self, magic: u64) {
@@ -45,41 +35,29 @@ impl BitWriter {
         self.write_bits(24, (magic & 0xff_ffff) as u32);
     }
 
-    pub fn write_u8(&mut self, byte: u8) {
-        self.write_bits(8, byte as u32);
-    }
+    pub fn write_u8(&mut self, byte: u8) { self.write_bits(8, byte as u32); }
 
-    pub fn write_u32(&mut self, val: u32) {
-        self.write_bits(32, val);
-    }
+    pub fn write_u32(&mut self, val: u32) { self.write_bits(32, val); }
 
     /// Take the whole bytes emitted so far, leaving any partial byte behind.
     ///
     /// This is what keeps a streaming writer's memory bounded: output can be
     /// handed off as it is produced instead of accumulating until `finish`.
-    pub fn drain(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.out)
-    }
+    pub fn drain(&mut self) -> Vec<u8> { std::mem::take(&mut self.out) }
 
     /// Append an exact MSB-first bit buffer whose final byte may be padded.
     pub fn write_buffer(&mut self, bytes: &[u8], bit_len: usize) {
         debug_assert!(bit_len <= bytes.len() * 8);
         let full = bit_len / 8;
-        for &byte in &bytes[..full] {
-            self.write_u8(byte);
-        }
+        for &byte in &bytes[..full] { self.write_u8(byte); }
         let trailing = bit_len % 8;
-        if trailing != 0 {
-            self.write_bits(trailing as u32, u32::from(bytes[full] >> (8 - trailing)));
-        }
+        if trailing != 0 { self.write_bits(trailing as u32, u32::from(bytes[full] >> (8 - trailing))); }
     }
 
     /// Pad a copy of the final byte while retaining the exact meaningful length.
     pub fn finish_bits(mut self) -> (Vec<u8>, usize) {
         let bit_len = self.out.len() * 8 + self.nbits as usize;
-        if self.nbits > 0 {
-            self.out.push((self.acc << (8 - self.nbits)) as u8);
-        }
+        if self.nbits > 0 { self.out.push((self.acc << (8 - self.nbits)) as u8); }
         (self.out, bit_len)
     }
 
@@ -94,11 +72,7 @@ impl BitWriter {
     }
 }
 
-impl Default for BitWriter {
-    fn default() -> Self {
-        BitWriter::new()
-    }
-}
+impl Default for BitWriter { fn default() -> Self { BitWriter::new() } }
 
 #[cfg(test)]
 mod tests {
@@ -153,13 +127,9 @@ mod tests {
     #[test]
     fn straddles_accumulator_boundaries() {
         let mut w = BitWriter::new();
-        for _ in 0..10 {
-            w.write_bits(24, 0xab_cdef);
-        }
+        for _ in 0..10 { w.write_bits(24, 0xab_cdef); }
         let out = w.finish();
         assert_eq!(out.len(), 30);
-        for chunk in out.chunks(3) {
-            assert_eq!(chunk, &[0xab, 0xcd, 0xef]);
-        }
+        for chunk in out.chunks(3) { assert_eq!(chunk, &[0xab, 0xcd, 0xef]); }
     }
 }

@@ -8,26 +8,15 @@ use std::{
 use crate::{DecodeOptions, Error, Format, PipeReader, Result, Source, decode_stream_to_sink_with_progress, output_pipe};
 
 #[derive(Clone)]
-struct StoredError {
-    kind: io::ErrorKind,
-    message: String,
-}
+struct StoredError { kind: io::ErrorKind, message: String }
 
 impl StoredError {
-    fn new(error: io::Error) -> Self {
-        Self { kind: error.kind(), message: error.to_string() }
-    }
+    fn new(error: io::Error) -> Self { Self { kind: error.kind(), message: error.to_string() } }
 
-    fn io_error(&self) -> io::Error {
-        io::Error::new(self.kind, self.message.clone())
-    }
+    fn io_error(&self) -> io::Error { io::Error::new(self.kind, self.message.clone()) }
 }
 
-enum State {
-    Reading,
-    Eof,
-    Failed(StoredError),
-}
+enum State { Reading, Eof, Failed(StoredError) }
 
 /// A streaming, parallel bzip2, gzip, or LZ4 decoder for file-backed streams.
 ///
@@ -108,19 +97,11 @@ impl Reader {
 
 impl Read for Reader {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        if buffer.is_empty() {
-            return Ok(0);
-        }
+        if buffer.is_empty() { return Ok(0); }
         loop {
-            match &self.state {
-                State::Eof => return Ok(0),
-                State::Failed(error) => return Err(error.io_error()),
-                State::Reading => {}
-            }
+            match &self.state { State::Eof => return Ok(0), State::Failed(error) => return Err(error.io_error()), State::Reading => {} }
             let count = self.pipe.as_mut().expect("reading state must own its pipe").read(buffer)?;
-            if count != 0 {
-                return Ok(count);
-            }
+            if count != 0 { return Ok(count); }
             let result = match self.result.as_ref().expect("reading state must own its result receiver").recv() {
                 Ok(result) => result,
                 Err(_) => return Err(self.disconnected()),

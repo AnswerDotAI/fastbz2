@@ -3,9 +3,7 @@ mod common;
 
 use std::{path::PathBuf, process::Command};
 
-fn fixture(extension: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("meta/simplewiki-first-5pct.xml.{extension}"))
-}
+fn fixture(extension: &str) -> PathBuf { PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!("meta/simplewiki-first-5pct.xml.{extension}")) }
 
 fn fbz(input: &std::path::Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_fbz"));
@@ -34,12 +32,8 @@ fn compare(extension: &str, program: &str) {
 
 #[test]
 #[ignore = "local single-run bzip2 CLI comparison"]
-fn bzip2_cli_comparison() {
-    compare("bz2", "bzip2");
-}
+fn bzip2_cli_comparison() { compare("bz2", "bzip2"); }
 
 #[test]
 #[ignore = "local single-run gzip CLI comparison"]
-fn gzip_cli_comparison() {
-    compare("gz", "gzip");
-}
+fn gzip_cli_comparison() { compare("gz", "gzip"); }

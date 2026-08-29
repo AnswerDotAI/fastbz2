@@ -20,11 +20,7 @@ const MULTI_ENTRY_INTRA_THRESHOLD: u64 = 64 * 1024 * 1024;
 const SINGLE_ENTRY_INTRA_THRESHOLD: u64 = 16 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum EntryKind {
-    File,
-    Directory,
-    Symlink,
-}
+enum EntryKind { File, Directory, Symlink }
 
 #[derive(Clone, Debug)]
 pub(super) struct Entry {
@@ -42,19 +38,11 @@ pub(super) struct Entry {
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct Report {
-    pub source_len: u64,
-    pub decoded_len: u64,
-    pub entries: Vec<Entry>,
-}
+pub(super) struct Report { pub source_len: u64, pub decoded_len: u64, pub entries: Vec<Entry> }
 
-fn invalid(message: impl Into<String>) -> Error {
-    Error::InvalidZip(message.into())
-}
+fn invalid(message: impl Into<String>) -> Error { Error::InvalidZip(message.into()) }
 
-fn zip_error(error: zip::result::ZipError) -> Error {
-    invalid(error.to_string())
-}
+fn zip_error(error: zip::result::ZipError) -> Error { invalid(error.to_string()) }
 
 fn ntfs_time(ticks: u64) -> Option<SystemTime> {
     const UNIX_EPOCH_TICKS: u64 = 116_444_736_000_000_000;
@@ -92,20 +80,14 @@ fn central_entry_count(data: &[u8], start: u64) -> Result<usize> {
 fn parse(data: &[u8], max_output: Option<usize>) -> Result<Report> {
     let mut archive = ZipArchive::new(Cursor::new(data)).map_err(zip_error)?;
     let central_start = archive.central_directory_start();
-    if central_entry_count(data, central_start)? != archive.len() {
-        return Err(invalid("central directory contains duplicate entry names"));
-    }
+    if central_entry_count(data, central_start)? != archive.len() { return Err(invalid("central directory contains duplicate entry names")); }
     let mut entries = Vec::with_capacity(archive.len());
     let mut decoded_len = 0_u64;
     for index in 0..archive.len() {
         let file = archive.by_index_raw(index).map_err(zip_error)?;
-        if file.encrypted() {
-            return Err(invalid(format!("encrypted entry {:?} is not supported", file.name())));
-        }
+        if file.encrypted() { return Err(invalid(format!("encrypted entry {:?} is not supported", file.name()))); }
         let path = file.enclosed_name().ok_or_else(|| invalid(format!("unsafe entry path {:?}", file.name())))?;
-        if path.as_os_str().is_empty() {
-            return Err(invalid("empty entry path"));
-        }
+        if path.as_os_str().is_empty() { return Err(invalid("empty entry path")); }
         let data_start = usize::try_from(file.data_start().ok_or_else(|| invalid(format!("cannot locate entry {:?}", file.name())))?)
             .map_err(|_| invalid(format!("entry offset for {:?} exceeds this platform", file.name())))?;
         let data_end_u64 =
@@ -114,19 +96,11 @@ fn parse(data: &[u8], max_output: Option<usize>) -> Result<Report> {
             return Err(invalid(format!("compressed range for {:?} overlaps the central directory or exceeds the archive", file.name())));
         }
         let data_end = data_end_u64 as usize;
-        let kind = if file.is_dir() {
-            EntryKind::Directory
-        } else if file.is_symlink() {
-            EntryKind::Symlink
-        } else {
-            EntryKind::File
-        };
+        let kind = if file.is_dir() { EntryKind::Directory } else if file.is_symlink() { EntryKind::Symlink } else { EntryKind::File };
         decoded_len = decoded_len.checked_add(file.size()).ok_or_else(|| invalid("total decoded size overflows u64"))?;
         if let Some(limit) = max_output
             && decoded_len > limit as u64
-        {
-            return Err(invalid(format!("decoded output exceeds {limit} bytes")));
-        }
+        { return Err(invalid(format!("decoded output exceeds {limit} bytes"))); }
         let method = file.compression();
         #[allow(deprecated)]
         let compression_method = method.to_u16();
@@ -151,9 +125,7 @@ fn parse(data: &[u8], max_output: Option<usize>) -> Result<Report> {
 fn validate_layout(entries: &[Entry]) -> Result<()> {
     let mut paths = HashMap::with_capacity(entries.len());
     for entry in entries {
-        if paths.insert(entry.path.clone(), entry.kind).is_some() {
-            return Err(invalid(format!("duplicate entry path {}", entry.path.display())));
-        }
+        if paths.insert(entry.path.clone(), entry.kind).is_some() { return Err(invalid(format!("duplicate entry path {}", entry.path.display()))); }
     }
     for entry in entries {
         for ancestor in entry.path.ancestors().skip(1).filter(|path| !path.as_os_str().is_empty()) {
@@ -165,23 +137,15 @@ fn validate_layout(entries: &[Entry]) -> Result<()> {
     let mut ranges: Vec<_> = entries.iter().filter(|entry| entry.compressed_size != 0).map(|entry| (entry.data_start, entry.data_end, &entry.path)).collect();
     ranges.sort_unstable_by_key(|range| range.0);
     for pair in ranges.windows(2) {
-        if pair[0].1 > pair[1].0 {
-            return Err(invalid(format!("compressed data for {} overlaps {}", pair[0].2.display(), pair[1].2.display())));
-        }
+        if pair[0].1 > pair[1].0 { return Err(invalid(format!("compressed data for {} overlaps {}", pair[0].2.display(), pair[1].2.display()))); }
     }
     Ok(())
 }
 
-struct ExpectedOutput<W> {
-    inner: W,
-    expected: u64,
-    written: u64,
-}
+struct ExpectedOutput<W> { inner: W, expected: u64, written: u64 }
 
 impl<W> ExpectedOutput<W> {
-    fn new(inner: W, expected: u64) -> Self {
-        Self { inner, expected, written: 0 }
-    }
+    fn new(inner: W, expected: u64) -> Self { Self { inner, expected, written: 0 } }
 
     fn check(&self, count: usize) -> io::Result<()> {
         if self.written.saturating_add(count as u64) > self.expected {
@@ -207,20 +171,13 @@ impl<W: OutputSink> OutputSink for ExpectedOutput<W> {
         Ok(())
     }
 
-    fn flush(&mut self) -> io::Result<()> {
-        self.inner.flush()
-    }
+    fn flush(&mut self) -> io::Result<()> { self.inner.flush() }
 
-    fn is_cancelled(&self) -> bool {
-        self.inner.is_cancelled()
-    }
+    fn is_cancelled(&self) -> bool { self.inner.is_cancelled() }
 }
 
 fn entry_error(entry: &Entry, error: Error) -> Error {
-    let detail = match error {
-        Error::InvalidGzip(message) | Error::InvalidZip(message) => message,
-        other => other.to_string(),
-    };
+    let detail = match error { Error::InvalidGzip(message) | Error::InvalidZip(message) => message, other => other.to_string() };
     invalid(format!("entry {}: {detail}", entry.path.display()))
 }
 
@@ -238,23 +195,17 @@ fn decode_entry(data: &[u8], entry: &Entry, output: &mut impl OutputSink, option
         let report =
             deflate::decompress_to_sink_with_options_and_progress(compressed, &mut output, options, progress).map_err(|error| entry_error(entry, error))?;
         (report.decoded_len, report.crc)
-    } else {
-        return Err(invalid(format!("entry {} uses unsupported compression method {}", entry.path.display(), entry.compression_method)));
-    };
+    } else { return Err(invalid(format!("entry {} uses unsupported compression method {}", entry.path.display(), entry.compression_method))); };
     output.flush()?;
     if decoded_size != entry.decoded_size {
         return Err(invalid(format!("entry {} size mismatch: expected {}, decoded {decoded_size}", entry.path.display(), entry.decoded_size)));
     }
-    if crc != entry.crc {
-        return Err(invalid(format!("entry {} CRC32 mismatch: expected {:08x}, decoded {crc:08x}", entry.path.display(), entry.crc)));
-    }
+    if crc != entry.crc { return Err(invalid(format!("entry {} CRC32 mismatch: expected {:08x}, decoded {crc:08x}", entry.path.display(), entry.crc))); }
     Ok(())
 }
 
 fn uses_intra_entry(entry: &Entry, entry_count: usize) -> bool {
-    if entry.method != CompressionMethod::DEFLATE {
-        return false;
-    }
+    if entry.method != CompressionMethod::DEFLATE { return false; }
     let threshold = if entry_count == 1 { SINGLE_ENTRY_INTRA_THRESHOLD } else { MULTI_ENTRY_INTRA_THRESHOLD };
     entry.compressed_size >= threshold
 }
@@ -297,12 +248,8 @@ where
         Ok(())
     };
     let (within, across): (Vec<_>, Vec<_>) = entries.iter().partition(|entry| uses_intra_entry(entry, entries.len()));
-    for entry in within {
-        run(entry, DecodeOptions { threads, ..options })?;
-    }
-    if across.is_empty() {
-        return Ok(());
-    }
+    for entry in within { run(entry, DecodeOptions { threads, ..options })?; }
+    if across.is_empty() { return Ok(()); }
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .thread_name(|index| format!("fbz-zip-{index}"))
@@ -329,11 +276,7 @@ pub(super) fn validate(data: &[u8], options: DecodeOptions, max_output: Option<u
 fn prepare_directories(root: &Path, entries: &[Entry]) -> Result<()> {
     for entry in entries {
         let path = root.join(&entry.path);
-        if entry.kind == EntryKind::Directory {
-            fs::create_dir_all(&path)?;
-        } else if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
+        if entry.kind == EntryKind::Directory { fs::create_dir_all(&path)?; } else if let Some(parent) = path.parent() { fs::create_dir_all(parent)?; }
     }
     Ok(())
 }
@@ -346,9 +289,7 @@ fn create_symlink(root: &Path, entry: &Entry, target: &[u8]) -> Result<()> {
     };
 
     let target = Path::new(OsStr::from_bytes(target));
-    if target.is_absolute() {
-        return Err(invalid(format!("entry {} has absolute symlink target {}", entry.path.display(), target.display())));
-    }
+    if target.is_absolute() { return Err(invalid(format!("entry {} has absolute symlink target {}", entry.path.display(), target.display()))); }
     let mut depth = entry.path.parent().map_or(0, |parent| parent.components().count());
     for component in target.components() {
         match component {
@@ -370,14 +311,10 @@ fn create_symlink(_root: &Path, entry: &Entry, _target: &[u8]) -> Result<()> {
 }
 
 fn extract_entry(data: &[u8], root: &Path, entry: &Entry, options: DecodeOptions, progress: &mut dyn FnMut(DecodeProgress)) -> Result<()> {
-    if entry.kind == EntryKind::Directory {
-        return Ok(());
-    }
+    if entry.kind == EntryKind::Directory { return Ok(()); }
     let path = root.join(&entry.path);
     if entry.kind == EntryKind::Symlink {
-        if entry.decoded_size > 64 * 1024 {
-            return Err(invalid(format!("symlink target in {} is too large", entry.path.display())));
-        }
+        if entry.decoded_size > 64 * 1024 { return Err(invalid(format!("symlink target in {} is too large", entry.path.display()))); }
         let mut target = Vec::with_capacity(entry.decoded_size as usize);
         let mut output = WriterSink::new(&mut target);
         decode_entry(data, entry, &mut output, options, progress)?;
@@ -392,25 +329,19 @@ fn extract_entry(data: &[u8], root: &Path, entry: &Entry, options: DecodeOptions
 }
 
 fn set_modified(path: &Path, modified: Option<SystemTime>) -> Result<()> {
-    if let Some(modified) = modified {
-        fs::File::open(path)?.set_times(fs::FileTimes::new().set_modified(modified))?;
-    }
+    if let Some(modified) = modified { fs::File::open(path)?.set_times(fs::FileTimes::new().set_modified(modified))?; }
     Ok(())
 }
 
 #[cfg(unix)]
 fn set_mode(path: &Path, mode: Option<u32>) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    if let Some(mode) = mode {
-        fs::set_permissions(path, fs::Permissions::from_mode(mode & 0o7777))?;
-    }
+    if let Some(mode) = mode { fs::set_permissions(path, fs::Permissions::from_mode(mode & 0o7777))?; }
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn set_mode(_path: &Path, _mode: Option<u32>) -> Result<()> {
-    Ok(())
-}
+fn set_mode(_path: &Path, _mode: Option<u32>) -> Result<()> { Ok(()) }
 
 pub(super) fn unpack(
     data: &[u8],

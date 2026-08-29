@@ -5,17 +5,13 @@ use std::{
 
 use fbz::{Error, Result};
 
-fn invalid(message: impl Into<String>) -> Error {
-    Error::InvalidConfiguration(message.into())
-}
+fn invalid(message: impl Into<String>) -> Error { Error::InvalidConfiguration(message.into()) }
 
 pub(super) fn archive_name(path: &Path) -> Result<PathBuf> {
     let relative = if path.is_absolute() {
         let current = env::current_dir()?;
         path.strip_prefix(&current).ok().map(Path::to_path_buf).or_else(|| path.file_name().map(PathBuf::from))
-    } else {
-        Some(path.to_path_buf())
-    }
+    } else { Some(path.to_path_buf()) }
     .ok_or_else(|| invalid(format!("cannot derive an archive name for {}", path.display())))?;
     let mut clean = PathBuf::new();
     for component in relative.components() {
@@ -27,8 +23,6 @@ pub(super) fn archive_name(path: &Path) -> Result<PathBuf> {
             }
         }
     }
-    if clean.as_os_str().is_empty() {
-        return Err(invalid(format!("cannot derive an archive name for {}", path.display())));
-    }
+    if clean.as_os_str().is_empty() { return Err(invalid(format!("cannot derive an archive name for {}", path.display()))); }
     Ok(clean)
 }

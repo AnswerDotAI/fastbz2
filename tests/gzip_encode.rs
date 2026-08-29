@@ -28,9 +28,7 @@ fn gzip_encoder_accepts_incremental_writes_and_flushes() {
     let input: Vec<_> = (0..400_000).map(|index| (index % 251) as u8).collect();
     let mut encoded = Vec::new();
     let mut encoder = gzip::Encoder::new(&mut encoded, EncodeOptions { threads: 3, memory_limit: 32 * 1024 * 1024, level: Some(3) }).unwrap();
-    for chunk in input.chunks(7777) {
-        encoder.write_all(chunk).unwrap();
-    }
+    for chunk in input.chunks(7777) { encoder.write_all(chunk).unwrap(); }
     encoder.flush().unwrap();
     let (_, report) = encoder.finish().unwrap();
     assert_eq!(report.input_len, input.len() as u64);

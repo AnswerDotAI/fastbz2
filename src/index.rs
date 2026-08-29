@@ -75,35 +75,23 @@ impl Index {
     }
 
     pub fn from_bytes(encoded: &[u8], source: &[u8]) -> Result<Self> {
-        if encoded.len() < CHECKSUM_LEN {
-            return Err(invalid("truncated header"));
-        }
+        if encoded.len() < CHECKSUM_LEN { return Err(invalid("truncated header")); }
         let (payload, checksum) = encoded.split_at(encoded.len() - CHECKSUM_LEN);
-        if blake3::hash(payload).as_bytes() != checksum {
-            return Err(invalid("payload checksum mismatch"));
-        }
+        if blake3::hash(payload).as_bytes() != checksum { return Err(invalid("payload checksum mismatch")); }
         let mut reader = IndexReader::new(payload);
-        if reader.take(8)? != MAGIC {
-            return Err(invalid("bad magic"));
-        }
-        if reader.u32()? != VERSION {
-            return Err(invalid("unsupported version"));
-        }
+        if reader.take(8)? != MAGIC { return Err(invalid("bad magic")); }
+        if reader.u32()? != VERSION { return Err(invalid("unsupported version")); }
         let source_len = reader.u64()?;
         let source_hash: [u8; 32] = reader.take(32)?.try_into().unwrap();
         let decoded_len = reader.u64()?;
         let stream_count = reader.usize("stream count")?;
         let block_count = reader.usize("block count")?;
-        if source_len != source.len() as u64 || source_hash != *blake3::hash(source).as_bytes() {
-            return Err(invalid("source identity mismatch"));
-        }
+        if source_len != source.len() as u64 || source_hash != *blake3::hash(source).as_bytes() { return Err(invalid("source identity mismatch")); }
         let required = stream_count
             .checked_mul(53)
             .and_then(|size| block_count.checked_mul(44).and_then(|blocks| size.checked_add(blocks)))
             .ok_or_else(|| invalid("record counts overflow"))?;
-        if reader.remaining() != required {
-            return Err(invalid("record counts do not match payload length"));
-        }
+        if reader.remaining() != required { return Err(invalid("record counts do not match payload length")); }
 
         let mut streams = Vec::with_capacity(stream_count);
         for _ in 0..stream_count {
@@ -134,35 +122,25 @@ impl Index {
         Ok(index)
     }
 
-    pub fn save(&self, path: impl AsRef<Path>) -> Result<()> {
-        fs::write(path, self.to_bytes()).map_err(Error::from)
-    }
+    pub fn save(&self, path: impl AsRef<Path>) -> Result<()> { fs::write(path, self.to_bytes()).map_err(Error::from) }
 
-    pub fn load(path: impl AsRef<Path>, source: &[u8]) -> Result<Self> {
-        Self::from_bytes(&fs::read(path)?, source)
-    }
+    pub fn load(path: impl AsRef<Path>, source: &[u8]) -> Result<Self> { Self::from_bytes(&fs::read(path)?, source) }
 
     fn validate(&self) -> Result<()> {
         let source_bits = self.source_len.checked_mul(8).ok_or_else(|| invalid("source length overflow"))?;
         let mut decoded = 0_u64;
         for (number, block) in self.blocks.iter().enumerate() {
-            if block.decoded_start != decoded || block.decoded_len == 0 {
-                return Err(invalid("block decoded offsets are not contiguous"));
-            }
+            if block.decoded_start != decoded || block.decoded_len == 0 { return Err(invalid("block decoded offsets are not contiguous")); }
             if block.compressed_start_bit >= block.compressed_end_bit || block.compressed_end_bit > source_bits {
                 return Err(invalid("block compressed range is invalid"));
             }
-            if block.stream as usize >= self.streams.len() {
-                return Err(invalid("block stream number is out of range"));
-            }
+            if block.stream as usize >= self.streams.len() { return Err(invalid("block stream number is out of range")); }
             decoded = decoded.checked_add(block.decoded_len).ok_or_else(|| invalid("decoded offset overflow"))?;
             if number > 0 && self.blocks[number - 1].compressed_start_bit >= block.compressed_start_bit {
                 return Err(invalid("block compressed offsets are not increasing"));
             }
         }
-        if decoded != self.decoded_len {
-            return Err(invalid("decoded size does not match block records"));
-        }
+        if decoded != self.decoded_len { return Err(invalid("decoded size does not match block records")); }
         let mut first_block = 0_u64;
         let mut stream_decoded = 0_u64;
         for (number, stream) in self.streams.iter().enumerate() {
@@ -170,53 +148,32 @@ impl Index {
                 || stream.first_block != first_block
                 || stream.decoded_start != stream_decoded
                 || stream.eos_bit > source_bits
-            {
-                return Err(invalid("stream record is inconsistent"));
-            }
+            { return Err(invalid("stream record is inconsistent")); }
             let end = stream.first_block.checked_add(stream.block_count).ok_or_else(|| invalid("stream block count overflow"))?;
-            if end as usize > self.blocks.len() {
-                return Err(invalid("stream block range is out of bounds"));
-            }
+            if end as usize > self.blocks.len() { return Err(invalid("stream block range is out of bounds")); }
             for block in &self.blocks[stream.first_block as usize..end as usize] {
-                if block.stream != number as u64 {
-                    return Err(invalid("block belongs to the wrong stream"));
-                }
+                if block.stream != number as u64 { return Err(invalid("block belongs to the wrong stream")); }
             }
             first_block = end;
             stream_decoded = stream_decoded.checked_add(stream.decoded_len).ok_or_else(|| invalid("stream size overflow"))?;
         }
-        if first_block as usize != self.blocks.len() || stream_decoded != self.decoded_len {
-            return Err(invalid("stream records do not cover decoded data"));
-        }
+        if first_block as usize != self.blocks.len() || stream_decoded != self.decoded_len { return Err(invalid("stream records do not cover decoded data")); }
         Ok(())
     }
 }
 
-fn invalid(message: impl Into<String>) -> Error {
-    Error::InvalidIndex(message.into())
-}
+fn invalid(message: impl Into<String>) -> Error { Error::InvalidIndex(message.into()) }
 
-fn put_u32(out: &mut Vec<u8>, value: u32) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
+fn put_u32(out: &mut Vec<u8>, value: u32) { out.extend_from_slice(&value.to_le_bytes()); }
 
-fn put_u64(out: &mut Vec<u8>, value: u64) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
+fn put_u64(out: &mut Vec<u8>, value: u64) { out.extend_from_slice(&value.to_le_bytes()); }
 
-struct IndexReader<'a> {
-    data: &'a [u8],
-    pos: usize,
-}
+struct IndexReader<'a> { data: &'a [u8], pos: usize }
 
 impl<'a> IndexReader<'a> {
-    fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0 }
-    }
+    fn new(data: &'a [u8]) -> Self { Self { data, pos: 0 } }
 
-    fn remaining(&self) -> usize {
-        self.data.len() - self.pos
-    }
+    fn remaining(&self) -> usize { self.data.len() - self.pos }
 
     fn take(&mut self, count: usize) -> Result<&'a [u8]> {
         let end = self.pos.checked_add(count).ok_or_else(|| invalid("offset overflow"))?;
@@ -225,21 +182,13 @@ impl<'a> IndexReader<'a> {
         Ok(value)
     }
 
-    fn byte(&mut self) -> Result<u8> {
-        Ok(self.take(1)?[0])
-    }
+    fn byte(&mut self) -> Result<u8> { Ok(self.take(1)?[0]) }
 
-    fn u32(&mut self) -> Result<u32> {
-        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
-    }
+    fn u32(&mut self) -> Result<u32> { Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap())) }
 
-    fn u64(&mut self) -> Result<u64> {
-        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
-    }
+    fn u64(&mut self) -> Result<u64> { Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap())) }
 
-    fn usize(&mut self, name: &str) -> Result<usize> {
-        usize::try_from(self.u64()?).map_err(|_| invalid(format!("{name} does not fit this platform")))
-    }
+    fn usize(&mut self, name: &str) -> Result<usize> { usize::try_from(self.u64()?).map_err(|_| invalid(format!("{name} does not fit this platform"))) }
 }
 
 #[cfg(test)]

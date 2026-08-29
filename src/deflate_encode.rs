@@ -19,22 +19,12 @@ const MIN_SEGMENT_SIZE: usize = 64 * 1024;
 const MAX_MATCH: usize = 258;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct EncodeReport {
-    pub input_len: u64,
-    pub output_len: u64,
-    pub crc: u32,
-}
+pub struct EncodeReport { pub input_len: u64, pub output_len: u64, pub crc: u32 }
 
-struct BitWriter {
-    bytes: Vec<u8>,
-    pending: u64,
-    bits: u8,
-}
+struct BitWriter { bytes: Vec<u8>, pending: u64, bits: u8 }
 
 impl BitWriter {
-    fn new(capacity: usize) -> Self {
-        Self { bytes: Vec::with_capacity(capacity), pending: 0, bits: 0 }
-    }
+    fn new(capacity: usize) -> Self { Self { bytes: Vec::with_capacity(capacity), pending: 0, bits: 0 } }
 
     fn write_bits(&mut self, value: u32, count: u8) {
         debug_assert!(count <= 24);
@@ -66,9 +56,7 @@ impl BitWriter {
     }
 }
 
-fn reverse_code(code: u16, bits: u8) -> u16 {
-    code.reverse_bits() >> (16 - bits)
-}
+fn reverse_code(code: u16, bits: u8) -> u16 { code.reverse_bits() >> (16 - bits) }
 
 fn fixed_code(symbol: usize) -> (u16, u8) {
     match symbol {
@@ -86,11 +74,7 @@ fn write_fixed_symbol(output: &mut BitWriter, symbol: usize) {
 }
 
 fn symbol_for(value: usize, bases: &[usize], extras: &[u8]) -> (usize, u32, u8) {
-    for index in (0..bases.len()).rev() {
-        if value >= bases[index] {
-            return (index, (value - bases[index]) as u32, extras[index]);
-        }
-    }
+    for index in (0..bases.len()).rev() { if value >= bases[index] { return (index, (value - bases[index]) as u32, extras[index]); } }
     unreachable!()
 }
 
@@ -104,25 +88,9 @@ fn write_match(output: &mut BitWriter, length: usize, distance: usize) {
 }
 
 #[derive(Clone, Copy)]
-enum Token {
-    Literal(u8),
-    Match { length: u16, distance: u16 },
-}
+enum Token { Literal(u8), Match { length: u16, distance: u16 } }
 
-fn chain_depth(level: u8) -> usize {
-    match level {
-        1 => 4,
-        2 => 8,
-        3 => 16,
-        4 => 32,
-        5 => 48,
-        6 => 64,
-        7 => 96,
-        8 => 192,
-        9 => 384,
-        _ => unreachable!(),
-    }
-}
+fn chain_depth(level: u8) -> usize { match level { 1 => 4, 2 => 8, 3 => 16, 4 => 32, 5 => 48, 6 => 64, 7 => 96, 8 => 192, 9 => 384, _ => unreachable!() } }
 
 fn sync_boundary(output: &mut BitWriter) {
     output.write_bits(0, 3);
@@ -135,9 +103,7 @@ fn tokenize(bytes: &[u8], prefix_len: usize, level: u8) -> Vec<Token> {
     let max_chain = chain_depth(level);
     let mut finder = HashChain::new(bytes.len(), WINDOW_SIZE, max_chain);
     let dictionary_start = prefix_len.saturating_sub(WINDOW_SIZE);
-    for position in dictionary_start..prefix_len {
-        finder.insert(bytes, position);
-    }
+    for position in dictionary_start..prefix_len { finder.insert(bytes, position); }
     let mut position = prefix_len;
     while position < bytes.len() {
         let (length, distance) = finder.best_match(bytes, position, MAX_MATCH, 3, max_chain);
@@ -186,11 +152,7 @@ fn huffman_lengths(frequencies: &[u32], max_bits: u8) -> Vec<u8> {
     loop {
         let mut heap = BinaryHeap::new();
         let mut children = vec![None; scaled.len()];
-        for (symbol, &frequency) in scaled.iter().enumerate() {
-            if frequency != 0 {
-                heap.push(Reverse((u64::from(frequency), symbol)));
-            }
-        }
+        for (symbol, &frequency) in scaled.iter().enumerate() { if frequency != 0 { heap.push(Reverse((u64::from(frequency), symbol))); } }
         debug_assert!(heap.len() >= 2);
         while heap.len() > 1 {
             let Reverse((left_frequency, left)) = heap.pop().unwrap();
@@ -203,30 +165,20 @@ fn huffman_lengths(frequencies: &[u32], max_bits: u8) -> Vec<u8> {
         let mut lengths = vec![0_u8; scaled.len()];
         let mut stack = vec![(root, 0_u8)];
         while let Some((node, depth)) = stack.pop() {
-            if node < scaled.len() {
-                lengths[node] = depth.max(1);
-            } else {
+            if node < scaled.len() { lengths[node] = depth.max(1); } else {
                 let (left, right) = children[node].unwrap();
                 stack.push((left, depth + 1));
                 stack.push((right, depth + 1));
             }
         }
-        if lengths.iter().copied().max().unwrap_or(0) <= max_bits {
-            return lengths;
-        }
-        for frequency in &mut scaled {
-            if *frequency != 0 {
-                *frequency = frequency.div_ceil(2);
-            }
-        }
+        if lengths.iter().copied().max().unwrap_or(0) <= max_bits { return lengths; }
+        for frequency in &mut scaled { if *frequency != 0 { *frequency = frequency.div_ceil(2); } }
     }
 }
 
 fn ensure_two(frequencies: &mut [u32]) {
     let active: Vec<_> = frequencies.iter().enumerate().filter_map(|(symbol, &frequency)| (frequency != 0).then_some(symbol)).collect();
-    if active.len() >= 2 {
-        return;
-    }
+    if active.len() >= 2 { return; }
     if active.is_empty() {
         frequencies[0] = 1;
         frequencies[1] = 1;
@@ -238,11 +190,7 @@ fn ensure_two(frequencies: &mut [u32]) {
 
 fn huffman_codes(lengths: &[u8], max_bits: u8) -> Vec<u16> {
     let mut counts = vec![0_u16; max_bits as usize + 1];
-    for &length in lengths {
-        if length != 0 {
-            counts[length as usize] += 1;
-        }
-    }
+    for &length in lengths { if length != 0 { counts[length as usize] += 1; } }
     let mut next = vec![0_u16; counts.len()];
     let mut code = 0_u16;
     for bits in 1..counts.len() {
@@ -252,9 +200,7 @@ fn huffman_codes(lengths: &[u8], max_bits: u8) -> Vec<u16> {
     lengths
         .iter()
         .map(|&length| {
-            if length == 0 {
-                0
-            } else {
+            if length == 0 { 0 } else {
                 let code = next[length as usize];
                 next[length as usize] += 1;
                 reverse_code(code, length)
@@ -285,9 +231,7 @@ fn frequencies(tokens: &[Token]) -> ([u32; 286], [u32; 30]) {
 
 const CODE_LENGTH_ORDER: [usize; 19] = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
 
-fn write_code(output: &mut BitWriter, symbol: usize, codes: &[u16], lengths: &[u8]) {
-    output.write_bits(u32::from(codes[symbol]), lengths[symbol]);
-}
+fn write_code(output: &mut BitWriter, symbol: usize, codes: &[u16], lengths: &[u8]) { output.write_bits(u32::from(codes[symbol]), lengths[symbol]); }
 
 fn encode_dynamic(tokens: &[Token], input_len: usize) -> Vec<u8> {
     let (literal_frequencies, distance_frequencies) = frequencies(tokens);
@@ -297,9 +241,7 @@ fn encode_dynamic(tokens: &[Token], input_len: usize) -> Vec<u8> {
     let distance_count = distance_lengths.iter().rposition(|&length| length != 0).unwrap() + 1;
     let all_lengths: Vec<_> = literal_lengths[..literal_count].iter().chain(&distance_lengths[..distance_count]).copied().collect();
     let mut code_length_frequencies = [0_u32; 19];
-    for &length in &all_lengths {
-        code_length_frequencies[length as usize] += 1;
-    }
+    for &length in &all_lengths { code_length_frequencies[length as usize] += 1; }
     ensure_two(&mut code_length_frequencies);
     let code_length_lengths = huffman_lengths(&code_length_frequencies, 7);
     let code_length_count = CODE_LENGTH_ORDER.iter().rposition(|&symbol| code_length_lengths[symbol] != 0).unwrap().max(3) + 1;
@@ -312,12 +254,8 @@ fn encode_dynamic(tokens: &[Token], input_len: usize) -> Vec<u8> {
     output.write_bits((literal_count - 257) as u32, 5);
     output.write_bits((distance_count - 1) as u32, 5);
     output.write_bits((code_length_count - 4) as u32, 4);
-    for &symbol in &CODE_LENGTH_ORDER[..code_length_count] {
-        output.write_bits(u32::from(code_length_lengths[symbol]), 3);
-    }
-    for &length in &all_lengths {
-        write_code(&mut output, length as usize, &code_length_codes, &code_length_lengths);
-    }
+    for &symbol in &CODE_LENGTH_ORDER[..code_length_count] { output.write_bits(u32::from(code_length_lengths[symbol]), 3); }
+    for &length in &all_lengths { write_code(&mut output, length as usize, &code_length_codes, &code_length_lengths); }
     for token in tokens {
         match *token {
             Token::Literal(byte) => write_code(&mut output, byte as usize, &literal_codes, &literal_lengths),
@@ -349,11 +287,7 @@ fn encode_stored(bytes: &[u8]) -> Vec<u8> {
     output.finish_aligned()
 }
 
-struct Segment {
-    encoded: Vec<u8>,
-    input_len: usize,
-    crc: Hasher,
-}
+struct Segment { encoded: Vec<u8>, input_len: usize, crc: Hasher }
 
 fn encode_segment(buffer: Vec<u8>, prefix_len: usize, level: u8) -> Segment {
     let plain = &buffer[prefix_len..];
@@ -368,15 +302,11 @@ fn encode_segment(buffer: Vec<u8>, prefix_len: usize, level: u8) -> Segment {
     Segment { encoded, input_len: plain.len(), crc }
 }
 
-fn reservation(segment_size: usize) -> usize {
-    (segment_size + WINDOW_SIZE).saturating_mul(6).saturating_add((1 << 16) * size_of::<usize>())
-}
+fn reservation(segment_size: usize) -> usize { (segment_size + WINDOW_SIZE).saturating_mul(6).saturating_add((1 << 16) * size_of::<usize>()) }
 
 fn segment_size(memory_limit: usize) -> Result<usize> {
     let mut size = TARGET_SEGMENT_SIZE;
-    while size > MIN_SEGMENT_SIZE && reservation(size) > memory_limit {
-        size /= 2;
-    }
+    while size > MIN_SEGMENT_SIZE && reservation(size) > memory_limit { size /= 2; }
     if reservation(size) > memory_limit {
         return Err(Error::InvalidConfiguration(format!("compression memory limit must be at least {} bytes", reservation(size))));
     }
@@ -470,12 +400,8 @@ impl<W: Write> Encoder<W> {
     }
 
     fn submit_buffer(&mut self) -> Result<()> {
-        if self.buffer.len() == self.prefix_len {
-            return Ok(());
-        }
-        while !self.pipeline.can_submit(self.reservation) {
-            self.commit_next()?;
-        }
+        if self.buffer.len() == self.prefix_len { return Ok(()); }
+        while !self.pipeline.can_submit(self.reservation) { self.commit_next()?; }
         let mut next = Vec::with_capacity(self.segment_size + WINDOW_SIZE);
         let keep = self.buffer.len().min(WINDOW_SIZE);
         next.extend_from_slice(&self.buffer[self.buffer.len() - keep..]);
@@ -488,9 +414,7 @@ impl<W: Write> Encoder<W> {
 
     fn flush_segments(&mut self) -> Result<()> {
         self.submit_buffer()?;
-        while self.pipeline.has_pending() {
-            self.commit_next()?;
-        }
+        while self.pipeline.has_pending() { self.commit_next()?; }
         Ok(())
     }
 
@@ -514,9 +438,7 @@ impl<W: Write> Write for Encoder<W> {
             let take = bytes.len().min(self.segment_size - used);
             self.buffer.extend_from_slice(&bytes[..take]);
             bytes = &bytes[take..];
-            if self.buffer.len() - self.prefix_len == self.segment_size {
-                self.submit_buffer().map_err(Error::into_io)?;
-            }
+            if self.buffer.len() - self.prefix_len == self.segment_size { self.submit_buffer().map_err(Error::into_io)?; }
         }
         Ok(total)
     }

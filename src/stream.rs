@@ -30,10 +30,7 @@ impl DecodeFormat {
     }
 
     pub(crate) fn detect_path(self, path: &Path, data: &[u8]) -> Result<Format> {
-        match self.explicit() {
-            Some(format) => Ok(format),
-            None => Format::detect(path, data),
-        }
+        match self.explicit() { Some(format) => Ok(format), None => Format::detect(path, data) }
     }
 }
 
@@ -49,12 +46,8 @@ pub enum Format {
 impl Format {
     /// Detect a format from stream magic, falling back to the path extension.
     pub fn detect(path: impl AsRef<Path>, data: &[u8]) -> Result<Self> {
-        if let Some(format) = Self::from_magic(data) {
-            return Ok(format);
-        }
-        if let Some(format) = Self::from_path(path.as_ref()) {
-            return Ok(format);
-        }
+        if let Some(format) = Self::from_magic(data) { return Ok(format); }
+        if let Some(format) = Self::from_path(path.as_ref()) { return Ok(format); }
         Err(Error::UnsupportedFormat(format!(
             "cannot determine compression format for {}; expected a bzip2, gzip, LZ4, or ZIP extension or magic",
             path.as_ref().display()
@@ -74,19 +67,9 @@ impl Format {
 
     /// Infer a format from its leading magic bytes.
     pub fn from_magic(data: &[u8]) -> Option<Self> {
-        if data.starts_with(b"BZh") {
-            Some(Self::Bzip2)
-        } else if data.starts_with(&[0x1f, 0x8b]) {
-            Some(Self::Gzip)
-        } else if data.starts_with(&[0x04, 0x22, 0x4d, 0x18])
+        if data.starts_with(b"BZh") { Some(Self::Bzip2) } else if data.starts_with(&[0x1f, 0x8b]) { Some(Self::Gzip) } else if data.starts_with(&[0x04, 0x22, 0x4d, 0x18])
             || data.get(..4).is_some_and(|magic| (0x184d_2a50..=0x184d_2a5f).contains(&u32::from_le_bytes(magic.try_into().unwrap())))
-        {
-            Some(Self::Lz4)
-        } else if data.starts_with(b"PK\x03\x04") || data.starts_with(b"PK\x05\x06") || data.starts_with(b"PK\x07\x08") {
-            Some(Self::Zip)
-        } else {
-            None
-        }
+        { Some(Self::Lz4) } else if data.starts_with(b"PK\x03\x04") || data.starts_with(b"PK\x05\x06") || data.starts_with(b"PK\x07\x08") { Some(Self::Zip) } else { None }
     }
 }
 

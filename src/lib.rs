@@ -102,9 +102,7 @@ mod python {
     }
 
     #[pyfunction(name = "bz2_crc32")]
-    fn py_bz2_crc32(data: &[u8]) -> u32 {
-        crate::bz2_crc32(data)
-    }
+    fn py_bz2_crc32(data: &[u8]) -> u32 { crate::bz2_crc32(data) }
 
     #[pyfunction(name = "_decompress", signature = (data, format=None, threads=0, memory_limit=crate::DEFAULT_MEMORY_LIMIT))]
     fn py_decompress(py: Python<'_>, data: &[u8], format: Option<&str>, threads: usize, memory_limit: usize) -> PyResult<Py<PyBytes>> {
@@ -160,9 +158,7 @@ mod python {
     }
 
     #[pyclass(name = "_Reader")]
-    struct PyReader {
-        inner: Mutex<crate::Reader>,
-    }
+    struct PyReader { inner: Mutex<crate::Reader> }
 
     const PY_READINTO_CHUNK: usize = 1024 * 1024;
 
@@ -197,9 +193,7 @@ mod python {
         }
 
         fn readinto(&self, py: Python<'_>, buffer: PyBuffer<u8>) -> PyResult<usize> {
-            if buffer.as_mut_slice(py).is_none() {
-                return Err(PyTypeError::new_err("readinto() requires a writable, contiguous byte buffer"));
-            }
+            if buffer.as_mut_slice(py).is_none() { return Err(PyTypeError::new_err("readinto() requires a writable, contiguous byte buffer")); }
             let mut output = vec![0; buffer.item_count().min(PY_READINTO_CHUNK)];
             let count = py
                 .detach(|| {
@@ -207,17 +201,13 @@ mod python {
                     reader.read(&mut output)
                 })
                 .map_err(python_read_error)?;
-            for (destination, byte) in buffer.as_mut_slice(py).unwrap()[..count].iter().zip(&output) {
-                destination.set(*byte);
-            }
+            for (destination, byte) in buffer.as_mut_slice(py).unwrap()[..count].iter().zip(&output) { destination.set(*byte); }
             Ok(count)
         }
     }
 
     #[pyclass(name = "_IndexedReader")]
-    struct PyIndexedReader {
-        inner: Mutex<crate::IndexedReader>,
-    }
+    struct PyIndexedReader { inner: Mutex<crate::IndexedReader> }
 
     #[pymethods]
     impl PyIndexedReader {
@@ -288,14 +278,10 @@ mod python {
             .map_err(python_error)
         }
 
-        fn tell(&self) -> PyResult<u64> {
-            self.inner.lock().map(|reader| reader.position()).map_err(|_| PyValueError::new_err("reader lock poisoned"))
-        }
+        fn tell(&self) -> PyResult<u64> { self.inner.lock().map(|reader| reader.position()).map_err(|_| PyValueError::new_err("reader lock poisoned")) }
 
         #[getter]
-        fn size(&self) -> PyResult<u64> {
-            self.inner.lock().map(|reader| reader.size()).map_err(|_| PyValueError::new_err("reader lock poisoned"))
-        }
+        fn size(&self) -> PyResult<u64> { self.inner.lock().map(|reader| reader.size()).map_err(|_| PyValueError::new_err("reader lock poisoned")) }
 
         fn index_bytes(&self, py: Python<'_>) -> PyResult<Py<PyBytes>> {
             let encoded = self.inner.lock().map(|reader| reader.index().to_bytes()).map_err(|_| PyValueError::new_err("reader lock poisoned"))?;

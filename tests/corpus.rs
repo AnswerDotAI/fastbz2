@@ -21,9 +21,7 @@ fn corpus_files(extension: &str) -> Vec<PathBuf> {
     for source in ["go", "lbzip2"] {
         for entry in fs::read_dir(root.join(source)).unwrap() {
             let path = entry.unwrap().path();
-            if path.to_string_lossy().ends_with(extension) {
-                files.push(path)
-            }
+            if path.to_string_lossy().ends_with(extension) { files.push(path) }
         }
     }
     files.sort();
@@ -33,9 +31,7 @@ fn corpus_files(extension: &str) -> Vec<PathBuf> {
 /// Decode every concatenated stream through the low-level API so the oracle
 /// has the same whole-file semantics as fbz.
 fn oracle_decompress(input: &[u8]) -> Result<Vec<u8>, i32> {
-    if input.is_empty() {
-        return Err(libbz2_rs_sys::BZ_DATA_ERROR_MAGIC);
-    }
+    if input.is_empty() { return Err(libbz2_rs_sys::BZ_DATA_ERROR_MAGIC); }
     let mut decoded = Vec::new();
     let mut input_offset = 0;
 
@@ -57,9 +53,7 @@ fn oracle_decompress(input: &[u8]) -> Result<Vec<u8>, i32> {
             opaque: ptr::null_mut(),
         };
         let init = unsafe { BZ2_bzDecompressInit(&mut stream, 0, 0) };
-        if init != BZ_OK {
-            return Err(init);
-        }
+        if init != BZ_OK { return Err(init); }
 
         let result = loop {
             let start = decoded.len();
@@ -69,33 +63,21 @@ fn oracle_decompress(input: &[u8]) -> Result<Vec<u8>, i32> {
             let status = unsafe { BZ2_bzDecompress(&mut stream) };
             decoded.truncate(start + CHUNK - stream.avail_out as usize);
 
-            if status == BZ_STREAM_END {
-                break Ok(());
-            }
-            if status != BZ_OK {
-                break Err(status);
-            }
-            if stream.avail_in == 0 && stream.avail_out != 0 {
-                break Err(libbz2_rs_sys::BZ_UNEXPECTED_EOF);
-            }
+            if status == BZ_STREAM_END { break Ok(()); }
+            if status != BZ_OK { break Err(status); }
+            if stream.avail_in == 0 && stream.avail_out != 0 { break Err(libbz2_rs_sys::BZ_UNEXPECTED_EOF); }
         };
         let consumed = input_len - stream.avail_in;
         let end = unsafe { BZ2_bzDecompressEnd(&mut stream) };
         result?;
-        if end != BZ_OK {
-            return Err(end);
-        }
-        if consumed == 0 {
-            return Err(libbz2_rs_sys::BZ_DATA_ERROR);
-        }
+        if end != BZ_OK { return Err(end); }
+        if consumed == 0 { return Err(libbz2_rs_sys::BZ_DATA_ERROR); }
         input_offset += consumed as usize;
     }
     Ok(decoded)
 }
 
-fn patterned(size: usize, stride: usize) -> Vec<u8> {
-    (0..size).map(|index| ((index * stride + index / 251) & 255) as u8).collect()
-}
+fn patterned(size: usize, stride: usize) -> Vec<u8> { (0..size).map(|index| ((index * stride + index / 251) & 255) as u8).collect() }
 
 #[test]
 fn valid_upstream_corpus_matches_oracle() {
@@ -142,8 +124,6 @@ fn performance_regression_stays_bounded() {
     let fbz_time = benchmark::elapsed(repeats, || {
         std::hint::black_box(decompress(&encoded, DecodeOptions { threads: 2, ..DecodeOptions::default() }).unwrap());
     });
-    let oracle_time = benchmark::elapsed(repeats, || {
-        std::hint::black_box(oracle_decompress(&encoded).unwrap());
-    });
+    let oracle_time = benchmark::elapsed(repeats, || { std::hint::black_box(oracle_decompress(&encoded).unwrap()); });
     assert!(fbz_time.as_secs_f64() <= oracle_time.as_secs_f64() * 1.3, "fbz {fbz_time:?} exceeded 1.3x oracle {oracle_time:?}");
 }

@@ -14,9 +14,7 @@ fn input_file(directory: &tempfile::TempDir) -> std::path::PathBuf {
     path
 }
 
-fn fbz(format: &str, input: &Path) -> Command {
-    fbz_with_threads(format, input, 0)
-}
+fn fbz(format: &str, input: &Path) -> Command { fbz_with_threads(format, input, 0) }
 
 fn fbz_with_threads(format: &str, input: &Path, threads: usize) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_fbz"));
@@ -51,27 +49,18 @@ fn compare(format: &str, program: &str, arguments: &[&str]) {
 
 #[test]
 #[ignore = "local single-run bzip2 compression CLI comparison"]
-fn bzip2_compression_cli_comparison() {
-    compare("bzip2", "bzip2", &["-9", "-c"]);
-}
+fn bzip2_compression_cli_comparison() { compare("bzip2", "bzip2", &["-9", "-c"]); }
 
 #[test]
 #[ignore = "local single-run gzip compression CLI comparison"]
-fn gzip_compression_cli_comparison() {
-    compare("gzip", "gzip", &["-6", "-c"]);
-}
+fn gzip_compression_cli_comparison() { compare("gzip", "gzip", &["-6", "-c"]); }
 
 #[test]
 #[ignore = "local single-run LZ4 compression CLI comparison"]
-fn lz4_compression_cli_comparison() {
-    compare("lz4", "lz4", &["-c"]);
-}
+fn lz4_compression_cli_comparison() { compare("lz4", "lz4", &["-c"]); }
 
 #[derive(Clone, Copy)]
-enum ZipShape {
-    Single,
-    Many,
-}
+enum ZipShape { Single, Many }
 
 fn zip_inputs(directory: &Path, shape: ZipShape) -> Vec<PathBuf> {
     let contents = support::simplewiki_prefix();
@@ -92,9 +81,7 @@ fn zip_inputs(directory: &Path, shape: ZipShape) -> Vec<PathBuf> {
     }
 }
 
-fn fbz_zip(directory: &Path, output: &str, inputs: &[PathBuf]) -> Command {
-    fbz_zip_with_threads(directory, output, inputs, 0)
-}
+fn fbz_zip(directory: &Path, output: &str, inputs: &[PathBuf]) -> Command { fbz_zip_with_threads(directory, output, inputs, 0) }
 
 fn fbz_zip_with_threads(directory: &Path, output: &str, inputs: &[PathBuf], threads: usize) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_fbz"));
@@ -170,27 +157,19 @@ fn compare_tar(format: &str, flag: &str, suffix: &str) {
 
 #[test]
 #[ignore = "local single-run tar.bz2 creation comparison"]
-fn tar_bzip2_compression_cli_comparison() {
-    compare_tar("tar-bzip2", "-cjf", "tar.bz2");
-}
+fn tar_bzip2_compression_cli_comparison() { compare_tar("tar-bzip2", "-cjf", "tar.bz2"); }
 
 #[test]
 #[ignore = "local single-run tar.gz creation comparison"]
-fn tar_gzip_compression_cli_comparison() {
-    compare_tar("tar-gzip", "-czf", "tar.gz");
-}
+fn tar_gzip_compression_cli_comparison() { compare_tar("tar-gzip", "-czf", "tar.gz"); }
 
 #[test]
 #[ignore = "local single-run one-entry ZIP creation comparison"]
-fn zip_single_compression_cli_comparison() {
-    compare_zip(ZipShape::Single);
-}
+fn zip_single_compression_cli_comparison() { compare_zip(ZipShape::Single); }
 
 #[test]
 #[ignore = "local single-run many-entry ZIP creation comparison"]
-fn zip_many_compression_cli_comparison() {
-    compare_zip(ZipShape::Many);
-}
+fn zip_many_compression_cli_comparison() { compare_zip(ZipShape::Many); }
 
 #[test]
 #[ignore = "local one-run-per-count ZIP compression scaling diagnostic"]

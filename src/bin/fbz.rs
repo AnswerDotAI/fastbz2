@@ -126,22 +126,14 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> fbz::Result<()> {
     validate_cli(&cli)?;
-    if cli.compress {
-        return run_compress(&cli);
-    }
+    if cli.compress { return run_compress(&cli); }
     let options = DecodeOptions { threads: cli.threads, memory_limit: cli.memory_limit, ..DecodeOptions::default() };
     if cli.test {
-        for input in &cli.inputs {
-            test_input(input, options, cli.max_output, cli.quiet)?;
-        }
+        for input in &cli.inputs { test_input(input, options, cli.max_output, cli.quiet)?; }
         return Ok(());
     }
-    if cli.index {
-        return run_index(&cli, options);
-    }
-    if cli.list {
-        return run_list(&cli, options);
-    }
+    if cli.index { return run_index(&cli, options); }
+    if cli.list { return run_list(&cli, options); }
     run_decode(&cli, options)
 }
 
@@ -149,27 +141,17 @@ fn validate_cli(cli: &Cli) -> fbz::Result<()> {
     let selected_format = if cli.compress { Some(compression_format(cli)?) } else { None };
     let archive_compression =
         matches!(selected_format, Some(CompressionFormat::TarBzip2 | CompressionFormat::TarGzip | CompressionFormat::TarLz4 | CompressionFormat::Zip));
-    if cli.output.is_some() && cli.inputs.len() != 1 && !archive_compression {
-        return Err(invalid("--output requires exactly one input"));
-    }
+    if cli.output.is_some() && cli.inputs.len() != 1 && !archive_compression { return Err(invalid("--output requires exactly one input")); }
     if !cli.compress && cli.output.is_some() && cli.inputs.iter().any(|input| is_zip_archive(input)) {
         return Err(invalid("--output is not supported for ZIP archives"));
     }
-    if cli.inputs.iter().any(|input| input == "-") && cli.inputs.len() != 1 {
-        return Err(invalid("stdin must be the only input"));
-    }
-    if (cli.index || cli.list) && cli.inputs.iter().any(|input| input == "-") {
-        return Err(invalid("stdin is supported only for decoding and --test"));
-    }
+    if cli.inputs.iter().any(|input| input == "-") && cli.inputs.len() != 1 { return Err(invalid("stdin must be the only input")); }
+    if (cli.index || cli.list) && cli.inputs.iter().any(|input| input == "-") { return Err(invalid("stdin is supported only for decoding and --test")); }
     if !cli.compress && cli.skip_existing && cli.inputs.iter().any(|input| should_extract(cli, input)) {
         return Err(invalid("--skip-existing is not supported when extracting archives"));
     }
-    if cli.compress && cli.max_output.is_some() {
-        return Err(invalid("--max-output applies only to decompression"));
-    }
-    if archive_compression && cli.remove_input {
-        return Err(invalid("--rm is not supported when creating archives"));
-    }
+    if cli.compress && cli.max_output.is_some() { return Err(invalid("--max-output applies only to decompression")); }
+    if archive_compression && cli.remove_input { return Err(invalid("--rm is not supported when creating archives")); }
     Ok(())
 }
 
@@ -181,17 +163,7 @@ fn inferred_compression_format(path: &Path) -> Option<CompressionFormat> {
         Some(CompressionFormat::TarLz4)
     } else if name.ends_with(".tar.gz") || name.ends_with(".tar.gzip") || name.ends_with(".tgz") {
         Some(CompressionFormat::TarGzip)
-    } else if name.ends_with(".zip") {
-        Some(CompressionFormat::Zip)
-    } else if name.ends_with(".gz") || name.ends_with(".gzip") {
-        Some(CompressionFormat::Gzip)
-    } else if name.ends_with(".bz2") || name.ends_with(".bzip2") {
-        Some(CompressionFormat::Bzip2)
-    } else if name.ends_with(".lz4") {
-        Some(CompressionFormat::Lz4)
-    } else {
-        None
-    }
+    } else if name.ends_with(".zip") { Some(CompressionFormat::Zip) } else if name.ends_with(".gz") || name.ends_with(".gzip") { Some(CompressionFormat::Gzip) } else if name.ends_with(".bz2") || name.ends_with(".bzip2") { Some(CompressionFormat::Bzip2) } else if name.ends_with(".lz4") { Some(CompressionFormat::Lz4) } else { None }
 }
 
 fn compression_format(cli: &Cli) -> fbz::Result<CompressionFormat> {
@@ -221,9 +193,7 @@ fn compressed_output(input: &Path, format: CompressionFormat, directory: Option<
 fn run_compress(cli: &Cli) -> fbz::Result<()> {
     let format = compression_format(cli)?;
     let options = EncodeOptions { threads: cli.threads, memory_limit: cli.memory_limit, level: cli.level };
-    if let Some(directory) = &cli.output_dir {
-        fs::create_dir_all(directory)?;
-    }
+    if let Some(directory) = &cli.output_dir { fs::create_dir_all(directory)?; }
     match format {
         CompressionFormat::TarBzip2 | CompressionFormat::TarGzip | CompressionFormat::TarLz4 => compress_tar(cli, format, options),
         CompressionFormat::Zip => compress_zip(cli, options),
@@ -239,12 +209,8 @@ fn archive_output(cli: &Cli, format: CompressionFormat, kind: &str) -> fbz::Resu
 }
 
 fn write_archive_output(cli: &Cli, output: &Path, write: impl FnOnce(&mut dyn Write) -> fbz::Result<()>) -> fbz::Result<()> {
-    if output == Path::new("-") {
-        return write(&mut io::stdout().lock());
-    }
-    if should_skip(output, cli.skip_existing, cli.quiet) {
-        return Ok(());
-    }
+    if output == Path::new("-") { return write(&mut io::stdout().lock()); }
+    if should_skip(output, cli.skip_existing, cli.quiet) { return Ok(()); }
     atomic_write(output, cli.force, |writer| write(writer))
 }
 
@@ -259,9 +225,7 @@ fn compress_tar(cli: &Cli, format: CompressionFormat, options: EncodeOptions) ->
 }
 
 fn compress_zip(cli: &Cli, options: EncodeOptions) -> fbz::Result<()> {
-    if cli.inputs.iter().any(|input| input == "-") {
-        return Err(invalid("stdin cannot be used as a ZIP archive entry"));
-    }
+    if cli.inputs.iter().any(|input| input == "-") { return Err(invalid("stdin cannot be used as a ZIP archive entry")); }
     let output = archive_output(cli, CompressionFormat::Zip, "ZIP")?;
     let inputs = cli
         .inputs
@@ -284,24 +248,16 @@ fn compress_streams(cli: &Cli, format: CompressionFormat, options: EncodeOptions
             let mut source: Box<dyn Read> = if input == "-" { Box::new(io::stdin().lock()) } else { Box::new(fs::File::open(input)?) };
             let total = if input == "-" { 0 } else { fs::metadata(input)?.len() };
             compress_stream(format, &mut source, &mut io::stdout().lock(), options, input, total, cli.quiet)?;
-            if cli.remove_input && input != "-" {
-                fs::remove_file(input)?;
-            }
+            if cli.remove_input && input != "-" { fs::remove_file(input)?; }
         } else {
-            if should_skip(&output, cli.skip_existing, cli.quiet) {
-                continue;
-            }
+            if should_skip(&output, cli.skip_existing, cli.quiet) { continue; }
             let input_path = Path::new(input);
-            if input_path == output {
-                return Err(invalid(format!("input and output are both {}", input_path.display())));
-            }
+            if input_path == output { return Err(invalid(format!("input and output are both {}", input_path.display()))); }
             let mut source = fs::File::open(input_path)?;
             let total = source.metadata()?.len();
             atomic_write(&output, cli.force, |writer| compress_stream(format, &mut source, writer, options, input, total, cli.quiet))?;
             preserve_metadata(input_path, &output)?;
-            if cli.remove_input {
-                fs::remove_file(input_path)?;
-            }
+            if cli.remove_input { fs::remove_file(input_path)?; }
         }
     }
     Ok(())
@@ -326,45 +282,31 @@ fn compress_stream(
     fbz::compress_to_writer_with_progress(input, output, format, options, |progress| display.update_encode(progress)).map(|_| ())
 }
 
-fn should_extract(cli: &Cli, input: &str) -> bool {
-    cli.extract || (cli.output.is_none() && is_archive(input))
-}
+fn should_extract(cli: &Cli, input: &str) -> bool { cli.extract || (cli.output.is_none() && is_archive(input)) }
 
 fn run_decode(cli: &Cli, options: DecodeOptions) -> fbz::Result<()> {
-    if let Some(directory) = &cli.output_dir {
-        fs::create_dir_all(directory)?;
-    }
+    if let Some(directory) = &cli.output_dir { fs::create_dir_all(directory)?; }
     for input in &cli.inputs {
         let extract = should_extract(cli, input);
         if extract {
             let destination = cli.output_dir.as_deref().unwrap_or_else(|| Path::new("."));
             extract_input(input, destination, cli.force, options, cli.max_output, cli.quiet)?;
-            if cli.remove_input && input != "-" {
-                fs::remove_file(input)?;
-            }
+            if cli.remove_input && input != "-" { fs::remove_file(input)?; }
             continue;
         }
         if input == "-" || cli.output.as_deref() == Some(Path::new("-")) {
             decode_input(input, &mut io::stdout().lock(), options, cli.max_output, cli.quiet)?;
-            if cli.remove_input && input != "-" {
-                fs::remove_file(input)?;
-            }
+            if cli.remove_input && input != "-" { fs::remove_file(input)?; }
             continue;
         }
         let input_path = Path::new(input);
         let output = cli.output.clone().unwrap_or_else(|| output_in(input_path, cli.output_dir.as_deref()));
-        if input_path == output {
-            return Err(invalid(format!("input and output are both {}", input_path.display())));
-        }
-        if should_skip(&output, cli.skip_existing, cli.quiet) {
-            continue;
-        }
+        if input_path == output { return Err(invalid(format!("input and output are both {}", input_path.display()))); }
+        if should_skip(&output, cli.skip_existing, cli.quiet) { continue; }
         let source = Source::open(input_path)?;
         atomic_write(&output, cli.force, |writer| decode_data(source.as_slice(), input, writer, options, cli.max_output, cli.quiet))?;
         preserve_metadata(input_path, &output)?;
-        if cli.remove_input {
-            fs::remove_file(input_path)?;
-        }
+        if cli.remove_input { fs::remove_file(input_path)?; }
     }
     Ok(())
 }
@@ -373,20 +315,12 @@ fn run_index(cli: &Cli, options: DecodeOptions) -> fbz::Result<()> {
     for input in &cli.inputs {
         let input_path = Path::new(input);
         let output = cli.output.clone().unwrap_or_else(|| PathBuf::from(format!("{}.fbz2i", input_path.display())));
-        if output != Path::new("-") && should_skip(&output, cli.skip_existing, cli.quiet) {
-            continue;
-        }
+        if output != Path::new("-") && should_skip(&output, cli.skip_existing, cli.quiet) { continue; }
         let source = Source::open(input_path)?;
-        if select_format(input, source.as_slice())? != Format::Bzip2 {
-            return Err(invalid("--index is currently supported only for bzip2 inputs"));
-        }
+        if select_format(input, source.as_slice())? != Format::Bzip2 { return Err(invalid("--index is currently supported only for bzip2 inputs")); }
         let index = build_index_data(source.as_slice(), input, options, cli.max_output, cli.quiet)?;
         let encoded = index.to_bytes();
-        if output == Path::new("-") {
-            io::stdout().lock().write_all(&encoded)?;
-        } else {
-            atomic_write(&output, cli.force, |writer| writer.write_all(&encoded).map_err(Error::from))?;
-        }
+        if output == Path::new("-") { io::stdout().lock().write_all(&encoded)?; } else { atomic_write(&output, cli.force, |writer| writer.write_all(&encoded).map_err(Error::from))?; }
     }
     Ok(())
 }
@@ -398,36 +332,20 @@ fn run_list(cli: &Cli, options: DecodeOptions) -> fbz::Result<()> {
         match select_format(input, source.as_slice())? {
             Format::Bzip2 => {
                 let index = build_index_data(source.as_slice(), input, options, cli.max_output, cli.quiet)?;
-                if cli.json {
-                    values.push(index_json(input, &index));
-                } else {
-                    print_index((cli.inputs.len() > 1).then_some(input), &index);
-                }
+                if cli.json { values.push(index_json(input, &index)); } else { print_index((cli.inputs.len() > 1).then_some(input), &index); }
             }
             Format::Gzip => {
                 let report = build_gzip_report_data(source.as_slice(), input, options, cli.max_output, cli.quiet)?;
-                if cli.json {
-                    values.push(gzip_json(input, &report));
-                } else {
-                    print_gzip_report((cli.inputs.len() > 1).then_some(input), &report);
-                }
+                if cli.json { values.push(gzip_json(input, &report)); } else { print_gzip_report((cli.inputs.len() > 1).then_some(input), &report); }
             }
             Format::Lz4 => {
                 let report = build_lz4_report_data(source.as_slice(), input, options, cli.max_output, cli.quiet)?;
-                if cli.json {
-                    values.push(lz4_json(input, &report));
-                } else {
-                    print_lz4_report((cli.inputs.len() > 1).then_some(input), &report);
-                }
+                if cli.json { values.push(lz4_json(input, &report)); } else { print_lz4_report((cli.inputs.len() > 1).then_some(input), &report); }
             }
             Format::Zip => {
                 let mut display = ProgressDisplay::new(input, source.as_slice().len() as u64, cli.quiet);
                 let report = zip_extract::validate(source.as_slice(), options, cli.max_output, |progress| display.update(progress))?;
-                if cli.json {
-                    values.push(zip_json(input, &report));
-                } else {
-                    print_zip_report((cli.inputs.len() > 1).then_some(input), &report);
-                }
+                if cli.json { values.push(zip_json(input, &report)); } else { print_zip_report((cli.inputs.len() > 1).then_some(input), &report); }
             }
         }
     }
@@ -462,9 +380,7 @@ fn extract_data(
     if select_format(label, data)? == Format::Zip {
         let mut display = ProgressDisplay::new(label, data.len() as u64, quiet);
         zip_extract::unpack(data, destination, overwrite, options, max_output, |progress| display.update(progress)).map(|_| ())
-    } else {
-        tar_extract::unpack(destination, overwrite, |writer| decode_data_to_sink(data, label, writer, options, max_output, quiet))
-    }
+    } else { tar_extract::unpack(destination, overwrite, |writer| decode_data_to_sink(data, label, writer, options, max_output, quiet)) }
 }
 
 fn test_input(input: &str, options: DecodeOptions, max_output: Option<usize>, quiet: bool) -> fbz::Result<()> {
@@ -481,9 +397,7 @@ fn test_data(data: &[u8], label: &str, options: DecodeOptions, max_output: Optio
     if select_format(label, data)? == Format::Zip {
         let mut display = ProgressDisplay::new(label, data.len() as u64, quiet);
         zip_extract::validate(data, options, max_output, |progress| display.update(progress)).map(|_| ())
-    } else {
-        decode_data(data, label, &mut io::sink(), options, max_output, quiet)
-    }
+    } else { decode_data(data, label, &mut io::sink(), options, max_output, quiet) }
 }
 
 fn decode_input(input: &str, output: &mut impl Write, options: DecodeOptions, max_output: Option<usize>, quiet: bool) -> fbz::Result<()> {
@@ -532,21 +446,13 @@ fn build_index_data(data: &[u8], label: &str, options: DecodeOptions, max_output
     if let Some(limit) = max_output {
         let mut sink = LimitedOutput::new(io::sink(), Some(limit));
         decode_to_writer_with_progress(data, &mut sink, options, |progress| display.update(progress))
-    } else {
-        build_index_with_progress(data, options, |progress| display.update(progress))
-    }
+    } else { build_index_with_progress(data, options, |progress| display.update(progress)) }
 }
 
-struct LimitedOutput<W> {
-    inner: W,
-    written: usize,
-    limit: Option<usize>,
-}
+struct LimitedOutput<W> { inner: W, written: usize, limit: Option<usize> }
 
 impl<W> LimitedOutput<W> {
-    fn new(inner: W, limit: Option<usize>) -> Self {
-        Self { inner, written: 0, limit }
-    }
+    fn new(inner: W, limit: Option<usize>) -> Self { Self { inner, written: 0, limit } }
 
     fn check(&self, count: usize) -> io::Result<()> {
         if self.limit.is_some_and(|limit| self.written.saturating_add(count) > limit) {
@@ -564,9 +470,7 @@ impl<W: Write> Write for LimitedOutput<W> {
         Ok(written)
     }
 
-    fn flush(&mut self) -> io::Result<()> {
-        self.inner.flush()
-    }
+    fn flush(&mut self) -> io::Result<()> { self.inner.flush() }
 }
 impl<W: OutputSink> OutputSink for LimitedOutput<W> {
     fn write_borrowed(&mut self, buffer: &[u8]) -> io::Result<()> {
@@ -584,13 +488,9 @@ impl<W: OutputSink> OutputSink for LimitedOutput<W> {
         Ok(())
     }
 
-    fn flush(&mut self) -> io::Result<()> {
-        self.inner.flush()
-    }
+    fn flush(&mut self) -> io::Result<()> { self.inner.flush() }
 
-    fn is_cancelled(&self) -> bool {
-        self.inner.is_cancelled()
-    }
+    fn is_cancelled(&self) -> bool { self.inner.is_cancelled() }
 }
 
 struct ProgressDisplay {
@@ -622,14 +522,10 @@ impl ProgressDisplay {
     }
 
     fn render(&mut self, completed: u64, left: u64, right: u64, throughput: u64, ratio: f64) {
-        if !self.enabled {
-            return;
-        }
+        if !self.enabled { return; }
         let elapsed = self.started.elapsed();
         let finished = completed >= self.total;
-        if (!self.drawn && elapsed < Duration::from_millis(200)) || (!finished && self.last_draw.elapsed() < Duration::from_millis(100)) {
-            return;
-        }
+        if (!self.drawn && elapsed < Duration::from_millis(200)) || (!finished && self.last_draw.elapsed() < Duration::from_millis(100)) { return; }
         let percent = if self.total == 0 { 100.0 } else { completed as f64 * 100.0 / self.total as f64 };
         let seconds = elapsed.as_secs_f64().max(0.001);
         let rate = throughput as f64 / seconds;
@@ -658,27 +554,17 @@ impl ProgressDisplay {
     }
 }
 
-impl Drop for ProgressDisplay {
-    fn drop(&mut self) {
-        self.finish();
-    }
-}
+impl Drop for ProgressDisplay { fn drop(&mut self) { self.finish(); } }
 
 fn should_skip(path: &Path, skip_existing: bool, quiet: bool) -> bool {
-    if !path.exists() || !skip_existing {
-        return false;
-    }
-    if !quiet {
-        eprintln!("fbz: skipping existing {}", path.display());
-    }
+    if !path.exists() || !skip_existing { return false; }
+    if !quiet { eprintln!("fbz: skipping existing {}", path.display()); }
     true
 }
 
 fn preserve_metadata(input: &Path, output: &Path) -> fbz::Result<()> {
     let metadata = fs::metadata(input)?;
-    if let Ok(modified) = metadata.modified() {
-        fs::OpenOptions::new().write(true).open(output)?.set_times(fs::FileTimes::new().set_modified(modified))?;
-    }
+    if let Ok(modified) = metadata.modified() { fs::OpenOptions::new().write(true).open(output)?.set_times(fs::FileTimes::new().set_modified(modified))?; }
     fs::set_permissions(output, metadata.permissions())?;
     Ok(())
 }
@@ -691,11 +577,8 @@ fn atomic_write(path: &Path, force: bool, write: impl FnOnce(&mut fs::File) -> f
     let mut temporary = NamedTempFile::new_in(parent)?;
     write(temporary.as_file_mut())?;
     temporary.as_file_mut().flush()?;
-    if force {
-        temporary.persist(path).map_err(|error| Error::Io(error.error))?;
-    } else {
-        temporary.persist_noclobber(path).map_err(|error| Error::Io(error.error))?;
-    }
+    if force { temporary.persist(path).map_err(|error| Error::Io(error.error))?; }
+    else { temporary.persist_noclobber(path).map_err(|error| Error::Io(error.error))?; }
     Ok(())
 }
 
@@ -722,26 +605,18 @@ fn is_tar_archive(input: &str) -> bool {
     [".tar.bz2", ".tar.bzip2", ".tbz", ".tbz2", ".tar.gz", ".tar.gzip", ".tgz", ".tar.lz4"].iter().any(|extension| input.ends_with(extension))
 }
 
-fn is_zip_archive(input: &str) -> bool {
-    input.to_ascii_lowercase().ends_with(".zip")
-}
+fn is_zip_archive(input: &str) -> bool { input.to_ascii_lowercase().ends_with(".zip") }
 
-fn is_archive(input: &str) -> bool {
-    is_tar_archive(input) || is_zip_archive(input)
-}
+fn is_archive(input: &str) -> bool { is_tar_archive(input) || is_zip_archive(input) }
 
 fn default_output(input: &Path) -> PathBuf {
     format_extension(input).map_or_else(|| PathBuf::from(format!("{}.out", input.display())), |(_, extension)| input.with_extension(extension))
 }
 
-fn select_format(input: &str, data: &[u8]) -> fbz::Result<Format> {
-    Format::detect(input, data)
-}
+fn select_format(input: &str, data: &[u8]) -> fbz::Result<Format> { Format::detect(input, data) }
 
 fn print_index(input: Option<&String>, index: &Index) {
-    if let Some(input) = input {
-        println!("input\t{input}");
-    }
+    if let Some(input) = input { println!("input\t{input}"); }
     println!("compressed_bytes\t{}", index.source_len);
     println!("decoded_bytes\t{}", index.decoded_len);
     println!("streams\t{}", index.streams.len());
@@ -755,9 +630,7 @@ fn print_index(input: Option<&String>, index: &Index) {
 }
 
 fn print_gzip_report(input: Option<&String>, report: &gzip::Report) {
-    if let Some(input) = input {
-        println!("input\t{input}");
-    }
+    if let Some(input) = input { println!("input\t{input}"); }
     println!("format\tgzip");
     println!("compressed_bytes\t{}", report.source_len);
     println!("decoded_bytes\t{}", report.decoded_len);
@@ -778,19 +651,14 @@ fn print_gzip_report(input: Option<&String>, report: &gzip::Report) {
 }
 
 fn print_lz4_report(input: Option<&String>, report: &lz4::Report) {
-    if let Some(input) = input {
-        println!("input\t{input}");
-    }
+    if let Some(input) = input { println!("input\t{input}"); }
     println!("format\tlz4");
     println!("compressed_bytes\t{}", report.source_len);
     println!("decoded_bytes\t{}", report.decoded_len);
     println!("frames\t{}", report.frames.len());
     println!("blocks\t{}", report.blocks.len());
     for (number, frame) in report.frames.iter().enumerate() {
-        let mode = match frame.block_mode {
-            lz4::BlockMode::Independent => "independent",
-            lz4::BlockMode::Linked => "linked",
-        };
+        let mode = match frame.block_mode { lz4::BlockMode::Independent => "independent", lz4::BlockMode::Linked => "linked" };
         println!(
             "frame\t{number}\tmode={mode}\tblock_max={}\tblocks={}\tdecoded={}\tblock_checksums={}\tcontent_checksum={}",
             frame.block_max_size, frame.block_count, frame.decoded_len, frame.block_checksums, frame.content_checksum,
@@ -799,9 +667,7 @@ fn print_lz4_report(input: Option<&String>, report: &lz4::Report) {
 }
 
 fn print_zip_report(input: Option<&String>, report: &zip_extract::Report) {
-    if let Some(input) = input {
-        println!("input\t{input}");
-    }
+    if let Some(input) = input { println!("input\t{input}"); }
     println!("format\tzip");
     println!("compressed_bytes\t{}", report.source_len);
     println!("decoded_bytes\t{}", report.decoded_len);
@@ -818,9 +684,7 @@ fn print_zip_report(input: Option<&String>, report: &zip_extract::Report) {
     }
 }
 
-fn member_block_count(report: &gzip::Report, member: usize) -> usize {
-    report.blocks.iter().filter(|block| block.member as usize == member).count()
-}
+fn member_block_count(report: &gzip::Report, member: usize) -> usize { report.blocks.iter().filter(|block| block.member as usize == member).count() }
 
 fn index_json(input: &str, index: &Index) -> Value {
     json!({
@@ -936,9 +800,7 @@ fn zip_json(input: &str, report: &zip_extract::Report) -> Value {
     })
 }
 
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
+fn hex(bytes: &[u8]) -> String { bytes.iter().map(|byte| format!("{byte:02x}")).collect() }
 
 fn format_bytes(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
@@ -953,13 +815,7 @@ fn format_bytes(bytes: u64) -> String {
 
 fn format_duration(seconds: f64) -> String {
     let seconds = seconds.max(0.0).round() as u64;
-    if seconds >= 3600 {
-        format!("{}h{:02}m", seconds / 3600, seconds / 60 % 60)
-    } else if seconds >= 60 {
-        format!("{}m{:02}s", seconds / 60, seconds % 60)
-    } else {
-        format!("{seconds}s")
-    }
+    if seconds >= 3600 { format!("{}h{:02}m", seconds / 3600, seconds / 60 % 60) } else if seconds >= 60 { format!("{}m{:02}s", seconds / 60, seconds % 60) } else { format!("{seconds}s") }
 }
 
 fn parse_size(value: &str) -> Result<usize, String> {
@@ -976,9 +832,7 @@ fn parse_size(value: &str) -> Result<usize, String> {
     number.checked_mul(multiplier).ok_or_else(|| format!("size {value:?} overflows this platform"))
 }
 
-fn invalid(message: impl Into<String>) -> Error {
-    Error::InvalidConfiguration(message.into())
-}
+fn invalid(message: impl Into<String>) -> Error { Error::InvalidConfiguration(message.into()) }
 
 fn exit_status(error: &Error) -> u8 {
     match error {

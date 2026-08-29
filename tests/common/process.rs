@@ -6,10 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-struct FootprintSampler {
-    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    worker: std::thread::JoinHandle<Option<u64>>,
-}
+struct FootprintSampler { stop: std::sync::Arc<std::sync::atomic::AtomicBool>, worker: std::thread::JoinHandle<Option<u64>> }
 
 #[cfg(target_os = "macos")]
 impl FootprintSampler {
@@ -24,9 +21,7 @@ impl FootprintSampler {
         let worker = std::thread::spawn(move || {
             let mut maximum = initial;
             while !worker_stop.load(Ordering::Relaxed) {
-                if let Some(value) = physical_footprint(pid) {
-                    maximum = Some(maximum.map_or(value, |previous: u64| previous.max(value)));
-                }
+                if let Some(value) = physical_footprint(pid) { maximum = Some(maximum.map_or(value, |previous: u64| previous.max(value))); }
                 std::thread::sleep(Duration::from_millis(50));
             }
             maximum
@@ -47,13 +42,8 @@ impl FootprintSampler {
 #[cfg(target_os = "macos")]
 fn physical_footprint(pid: libc::pid_t) -> Option<u64> {
     #[repr(C)]
-    struct RusageInfoV4 {
-        uuid: [u8; 16],
-        values: [u64; 35],
-    }
-    unsafe extern "C" {
-        fn proc_pid_rusage(pid: libc::c_int, flavor: libc::c_int, buffer: *mut libc::c_void) -> libc::c_int;
-    }
+    struct RusageInfoV4 { uuid: [u8; 16], values: [u64; 35] }
+    unsafe extern "C" { fn proc_pid_rusage(pid: libc::c_int, flavor: libc::c_int, buffer: *mut libc::c_void) -> libc::c_int; }
     let mut usage = RusageInfoV4 { uuid: [0; 16], values: [0; 35] };
     // SAFETY: flavor 4 requests the exact repr(C) buffer above, which remains
     // writable for the call; `pid` is the benchmark process's own child.
@@ -64,10 +54,7 @@ fn physical_footprint(pid: libc::pid_t) -> Option<u64> {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct Timing {
-    pub status: ExitStatus,
-    pub wall: Duration,
-}
+pub struct Timing { pub status: ExitStatus, pub wall: Duration }
 
 #[derive(Clone, Copy, Debug)]
 pub struct ProcessMetrics {
@@ -96,13 +83,9 @@ pub fn measure(command: &mut Command) -> io::Result<ProcessMetrics> {
         // SAFETY: `pid` names our live child, and both output pointers refer to
         // valid writable storage for the duration of the call.
         let result = unsafe { libc::wait4(pid, &mut status, 0, usage.as_mut_ptr()) };
-        if result >= 0 {
-            break;
-        }
+        if result >= 0 { break; }
         let error = io::Error::last_os_error();
-        if error.kind() != io::ErrorKind::Interrupted {
-            return Err(error);
-        }
+        if error.kind() != io::ErrorKind::Interrupted { return Err(error); }
     }
     // SAFETY: a successful `wait4` initialized the complete `rusage` value.
     let usage = unsafe { usage.assume_init() };

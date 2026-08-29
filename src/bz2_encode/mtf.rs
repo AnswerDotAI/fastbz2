@@ -24,17 +24,13 @@ pub struct Symbols {
 
 impl Symbols {
     /// Size of the Huffman alphabet: `n_in_use + 2`.
-    pub fn alpha_size(&self) -> usize {
-        self.in_use.len() + 2
-    }
+    pub fn alpha_size(&self) -> usize { self.in_use.len() + 2 }
 }
 
 /// Which of the 256 byte values occur in `block`.
 pub fn in_use(block: &[u8]) -> Vec<u8> {
     let mut seen = [false; 256];
-    for &b in block {
-        seen[b as usize] = true;
-    }
+    for &b in block { seen[b as usize] = true; }
     (0..256usize).filter(|&b| seen[b]).map(|b| b as u8).collect()
 }
 
@@ -104,15 +100,11 @@ mod tests {
             }
             if run > 0 {
                 let b = mtf[0];
-                for _ in 0..run {
-                    out.push(b);
-                }
+                for _ in 0..run { out.push(b); }
                 run = 0;
                 run_bit = 0;
             }
-            if s == eob {
-                break;
-            }
+            if s == eob { break; }
             let nn = (s - 1) as usize;
             let b = mtf[nn];
             mtf.copy_within(0..nn, 1);

@@ -13,15 +13,10 @@ use support::{ZipMethod, simplewiki_prefix, zip_bytes};
 
 const ENTRY_COUNT: usize = 18;
 
-fn requested_threads() -> usize {
-    std::env::var("FBZ_THREADS").ok().map(|value| value.parse().expect("FBZ_THREADS must be an integer")).unwrap_or(0)
-}
+fn requested_threads() -> usize { std::env::var("FBZ_THREADS").ok().map(|value| value.parse().expect("FBZ_THREADS must be an integer")).unwrap_or(0) }
 
 #[derive(Clone, Copy)]
-enum Shape {
-    Single,
-    Many,
-}
+enum Shape { Single, Many }
 
 struct Fixture {
     directory: tempfile::TempDir,
@@ -101,27 +96,19 @@ fn benchmark(shape: Shape, fbz: bool) {
 
 #[test]
 #[ignore = "local single-run one-entry ZIP extraction benchmark"]
-fn zip_single_fbz() {
-    benchmark(Shape::Single, true);
-}
+fn zip_single_fbz() { benchmark(Shape::Single, true); }
 
 #[test]
 #[ignore = "local single-run one-entry Info-ZIP baseline"]
-fn zip_single_unzip() {
-    benchmark(Shape::Single, false);
-}
+fn zip_single_unzip() { benchmark(Shape::Single, false); }
 
 #[test]
 #[ignore = "local single-run many-entry ZIP extraction benchmark"]
-fn zip_many_fbz() {
-    benchmark(Shape::Many, true);
-}
+fn zip_many_fbz() { benchmark(Shape::Many, true); }
 
 #[test]
 #[ignore = "local single-run many-entry Info-ZIP baseline"]
-fn zip_many_unzip() {
-    benchmark(Shape::Many, false);
-}
+fn zip_many_unzip() { benchmark(Shape::Many, false); }
 
 #[test]
 #[cfg(unix)]

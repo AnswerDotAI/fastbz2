@@ -8,24 +8,13 @@ use std::{
 use crate::{Bzip2Encoder, Error, Result, decode::DEFAULT_MEMORY_LIMIT, gzip, lz4};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EncodeFormat {
-    Bzip2,
-    Gzip,
-    Lz4,
-}
+pub enum EncodeFormat { Bzip2, Gzip, Lz4 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct EncodeReport {
-    pub format: EncodeFormat,
-    pub input_len: u64,
-    pub output_len: u64,
-}
+pub struct EncodeReport { pub format: EncodeFormat, pub input_len: u64, pub output_len: u64 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct EncodeProgress {
-    pub input_bytes: u64,
-    pub output_bytes: u64,
-}
+pub struct EncodeProgress { pub input_bytes: u64, pub output_bytes: u64 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct EncodeOptions {
@@ -37,37 +26,23 @@ pub struct EncodeOptions {
     pub level: Option<u8>,
 }
 
-impl Default for EncodeOptions {
-    fn default() -> Self {
-        Self { threads: 0, memory_limit: DEFAULT_MEMORY_LIMIT, level: None }
-    }
-}
+impl Default for EncodeOptions { fn default() -> Self { Self { threads: 0, memory_limit: DEFAULT_MEMORY_LIMIT, level: None } } }
 
 impl EncodeOptions {
-    pub fn resolved_threads(self) -> usize {
-        if self.threads != 0 { self.threads } else { thread::available_parallelism().map(usize::from).unwrap_or(1) }
-    }
+    pub fn resolved_threads(self) -> usize { if self.threads != 0 { self.threads } else { thread::available_parallelism().map(usize::from).unwrap_or(1) } }
 
     pub(crate) fn validate(self) -> Result<Self> {
         if self.level.is_some_and(|level| !(1..=9).contains(&level)) {
             return Err(Error::InvalidConfiguration("compression level must be between 1 and 9".into()));
         }
-        if self.memory_limit == 0 {
-            return Err(Error::InvalidConfiguration("compression memory limit must be greater than zero".into()));
-        }
+        if self.memory_limit == 0 { return Err(Error::InvalidConfiguration("compression memory limit must be greater than zero".into())); }
         Ok(self)
     }
 
-    pub(crate) fn level_or(self, default: u8) -> u8 {
-        self.level.unwrap_or(default)
-    }
+    pub(crate) fn level_or(self, default: u8) -> u8 { self.level.unwrap_or(default) }
 }
 
-pub enum Encoder<W: Write> {
-    Bzip2(Bzip2Encoder<W>),
-    Gzip(gzip::Encoder<W>),
-    Lz4(lz4::Encoder<W>),
-}
+pub enum Encoder<W: Write> { Bzip2(Bzip2Encoder<W>), Gzip(gzip::Encoder<W>), Lz4(lz4::Encoder<W>) }
 
 impl<W: Write> Encoder<W> {
     pub fn new(output: W, format: EncodeFormat, options: EncodeOptions) -> Result<Self> {
@@ -95,19 +70,11 @@ impl<W: Write> Encoder<W> {
 
 impl<W: Write> Write for Encoder<W> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        match self {
-            Self::Bzip2(encoder) => encoder.write(bytes),
-            Self::Gzip(encoder) => encoder.write(bytes),
-            Self::Lz4(encoder) => encoder.write(bytes),
-        }
+        match self { Self::Bzip2(encoder) => encoder.write(bytes), Self::Gzip(encoder) => encoder.write(bytes), Self::Lz4(encoder) => encoder.write(bytes) }
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        match self {
-            Self::Bzip2(encoder) => encoder.flush(),
-            Self::Gzip(encoder) => encoder.flush(),
-            Self::Lz4(encoder) => encoder.flush(),
-        }
+        match self { Self::Bzip2(encoder) => encoder.flush(), Self::Gzip(encoder) => encoder.flush(), Self::Lz4(encoder) => encoder.flush() }
     }
 }
 
@@ -121,10 +88,7 @@ pub fn compress_to_writer(input: &mut impl Read, output: &mut impl Write, format
     compress_to_writer_with_progress(input, output, format, options, |_| {})
 }
 
-struct CountingWriter<'a, W> {
-    inner: &'a mut W,
-    written: Rc<Cell<u64>>,
-}
+struct CountingWriter<'a, W> { inner: &'a mut W, written: Rc<Cell<u64>> }
 
 impl<W: Write> Write for CountingWriter<'_, W> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
@@ -133,9 +97,7 @@ impl<W: Write> Write for CountingWriter<'_, W> {
         Ok(written)
     }
 
-    fn flush(&mut self) -> io::Result<()> {
-        self.inner.flush()
-    }
+    fn flush(&mut self) -> io::Result<()> { self.inner.flush() }
 }
 
 pub fn compress_to_writer_with_progress(
@@ -152,9 +114,7 @@ pub fn compress_to_writer_with_progress(
     let mut input_bytes = 0_u64;
     loop {
         let read = input.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
+        if read == 0 { break; }
         encoder.write_all(&buffer[..read])?;
         input_bytes += read as u64;
         progress(EncodeProgress { input_bytes, output_bytes: written.get() });

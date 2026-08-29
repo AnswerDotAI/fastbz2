@@ -24,15 +24,11 @@ pub fn transform(block: &[u8]) -> (Vec<u8>, usize) {
     let n = block.len();
     assert!(n > 0, "BWT of an empty block");
 
-    if n == 1 {
-        return (vec![block[0]], 0);
-    }
+    if n == 1 { return (vec![block[0]], 0); }
 
     // Doubled block, shifted up by one so 0 can serve as the unique sentinel.
     let mut doubled = Vec::with_capacity(2 * n + 1);
-    for _ in 0..2 {
-        doubled.extend(block.iter().map(|&b| b as u32 + 1));
-    }
+    for _ in 0..2 { doubled.extend(block.iter().map(|&b| b as u32 + 1)); }
     doubled.push(0);
 
     let sa = sais(&doubled, 257);
@@ -41,12 +37,8 @@ pub fn transform(block: &[u8]) -> (Vec<u8>, usize) {
     let mut orig_ptr = 0usize;
     for &suffix in &sa {
         let p = suffix as usize;
-        if p >= n {
-            continue;
-        }
-        if p == 0 {
-            orig_ptr = last.len();
-        }
+        if p >= n { continue; }
+        if p == 0 { orig_ptr = last.len(); }
         last.push(block[(p + n - 1) % n]);
     }
     debug_assert_eq!(last.len(), n);
@@ -88,10 +80,7 @@ fn sais(s: &[u32], k: usize) -> Vec<u32> {
     let mut prev: Option<usize> = None;
     for &p in &lms_sorted {
         let p = p as usize;
-        let fresh = match prev {
-            None => true,
-            Some(q) => !lms_substr_eq(s, &types, p, q),
-        };
+        let fresh = match prev { None => true, Some(q) => !lms_substr_eq(s, &types, p, q) };
         if fresh {
             name += 1;
             prev = Some(p);
@@ -106,21 +95,15 @@ fn sais(s: &[u32], k: usize) -> Vec<u32> {
     debug_assert_eq!(lms_pos.len(), n1);
     let reduced: Vec<u32> = lms_pos.iter().map(|&p| names[p as usize / 2]).collect();
 
-    let sub_sa = if (name as usize) < n1 {
-        sais(&reduced, name as usize)
-    } else {
+    let sub_sa = if (name as usize) < n1 { sais(&reduced, name as usize) } else {
         // All names distinct: the suffix array is just the inverse permutation.
         let mut sub = vec![0u32; n1];
-        for (i, &c) in reduced.iter().enumerate() {
-            sub[c as usize] = i as u32;
-        }
+        for (i, &c) in reduced.iter().enumerate() { sub[c as usize] = i as u32; }
         sub
     };
 
     // Pass 2: seed the LMS suffixes in their true order, induce the rest.
-    for slot in sa.iter_mut() {
-        *slot = EMPTY;
-    }
+    for slot in sa.iter_mut() { *slot = EMPTY; }
     let mut bucket = bucket_ends(&counts);
     for i in (0..n1).rev() {
         let p = lms_pos[sub_sa[i] as usize] as usize;
@@ -149,15 +132,11 @@ fn classify(s: &[u32]) -> Vec<bool> {
 }
 
 #[inline]
-fn is_lms(types: &[bool], i: usize) -> bool {
-    i > 0 && types[i] && !types[i - 1]
-}
+fn is_lms(types: &[bool], i: usize) -> bool { i > 0 && types[i] && !types[i - 1] }
 
 fn counts(s: &[u32], k: usize) -> Vec<u32> {
     let mut counts = vec![0u32; k];
-    for &c in s {
-        counts[c as usize] += 1;
-    }
+    for &c in s { counts[c as usize] += 1; }
     counts
 }
 
@@ -216,25 +195,15 @@ fn induce(s: &[u32], sa: &mut [u32], types: &[bool], counts: &[u32]) {
 /// including the next LMS position).
 fn lms_substr_eq(s: &[u32], types: &[bool], p: usize, q: usize) -> bool {
     let n = s.len();
-    if p == n - 1 || q == n - 1 {
-        return p == q;
-    }
+    if p == n - 1 || q == n - 1 { return p == q; }
     let mut d = 0usize;
     loop {
-        if p + d >= n || q + d >= n {
-            return false;
-        }
+        if p + d >= n || q + d >= n { return false; }
         let p_lms = d > 0 && is_lms(types, p + d);
         let q_lms = d > 0 && is_lms(types, q + d);
-        if p_lms && q_lms {
-            return true;
-        }
-        if p_lms != q_lms {
-            return false;
-        }
-        if s[p + d] != s[q + d] || types[p + d] != types[q + d] {
-            return false;
-        }
+        if p_lms && q_lms { return true; }
+        if p_lms != q_lms { return false; }
+        if s[p + d] != s[q + d] || types[p + d] != types[q + d] { return false; }
         d += 1;
     }
 }
@@ -259,12 +228,8 @@ mod tests {
     fn inverse(last: &[u8], orig_ptr: usize) -> Vec<u8> {
         let n = last.len();
         let mut cftab = [0u32; 257];
-        for &b in last {
-            cftab[b as usize + 1] += 1;
-        }
-        for i in 1..=256 {
-            cftab[i] += cftab[i - 1];
-        }
+        for &b in last { cftab[b as usize + 1] += 1; }
+        for i in 1..=256 { cftab[i] += cftab[i - 1]; }
         let mut tt: Vec<u32> = last.iter().map(|&b| b as u32).collect();
         for i in 0..n {
             let b = (tt[i] & 0xff) as usize;

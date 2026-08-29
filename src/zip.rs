@@ -22,17 +22,10 @@ const SINGLE_ENTRY_PARALLEL: u64 = 16 * 1024 * 1024;
 const MULTI_ENTRY_PARALLEL: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
-pub struct PathInput {
-    pub source: PathBuf,
-    pub archive_path: PathBuf,
-}
+pub struct PathInput { pub source: PathBuf, pub archive_path: PathBuf }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Kind {
-    File,
-    Directory,
-    Symlink,
-}
+enum Kind { File, Directory, Symlink }
 
 #[derive(Clone, Debug)]
 struct Entry {
@@ -58,41 +51,21 @@ struct CentralEntry {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EncodeReport {
-    pub entries: usize,
-    pub input_len: u64,
-    pub output_len: u64,
-}
+pub struct EncodeReport { pub entries: usize, pub input_len: u64, pub output_len: u64 }
 
-fn invalid(message: impl Into<String>) -> Error {
-    Error::InvalidZip(message.into())
-}
+fn invalid(message: impl Into<String>) -> Error { Error::InvalidZip(message.into()) }
 
 #[cfg(unix)]
 fn mode(metadata: &fs::Metadata) -> u32 {
     use std::os::unix::fs::{FileTypeExt, PermissionsExt};
-    let kind = if metadata.file_type().is_symlink() {
-        0o120000
-    } else if metadata.is_dir() {
-        0o040000
-    } else if metadata.file_type().is_file() {
-        0o100000
-    } else if metadata.file_type().is_fifo() {
-        0o010000
-    } else {
-        0
-    };
+    let kind = if metadata.file_type().is_symlink() { 0o120000 } else if metadata.is_dir() { 0o040000 } else if metadata.file_type().is_file() { 0o100000 } else if metadata.file_type().is_fifo() { 0o010000 } else { 0 };
     kind | metadata.permissions().mode()
 }
 
 #[cfg(not(unix))]
-fn mode(metadata: &fs::Metadata) -> u32 {
-    if metadata.is_dir() { 0o040755 } else { 0o100644 }
-}
+fn mode(metadata: &fs::Metadata) -> u32 { if metadata.is_dir() { 0o040755 } else { 0o100644 } }
 
-fn modified(metadata: &fs::Metadata) -> Option<u32> {
-    metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_secs().try_into().ok()
-}
+fn modified(metadata: &fs::Metadata) -> Option<u32> { metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?.as_secs().try_into().ok() }
 
 #[cfg(unix)]
 fn symlink_bytes(path: &Path) -> Result<Vec<u8>> {
@@ -101,9 +74,7 @@ fn symlink_bytes(path: &Path) -> Result<Vec<u8>> {
 }
 
 #[cfg(not(unix))]
-fn symlink_bytes(path: &Path) -> Result<Vec<u8>> {
-    Ok(fs::read_link(path)?.as_os_str().to_string_lossy().into_owned().into_bytes())
-}
+fn symlink_bytes(path: &Path) -> Result<Vec<u8>> { Ok(fs::read_link(path)?.as_os_str().to_string_lossy().into_owned().into_bytes()) }
 
 fn zip_name(path: &Path, directory: bool) -> Result<String> {
     let mut parts = Vec::new();
@@ -114,32 +85,16 @@ fn zip_name(path: &Path, directory: bool) -> Result<String> {
             _ => return Err(invalid(format!("unsafe ZIP path {}", path.display()))),
         }
     }
-    if parts.is_empty() {
-        return Err(invalid("empty ZIP path"));
-    }
+    if parts.is_empty() { return Err(invalid("empty ZIP path")); }
     let mut name = parts.join("/");
-    if directory {
-        name.push('/');
-    }
+    if directory { name.push('/'); }
     Ok(name)
 }
 
 fn collect(source: &Path, archive_path: &Path, entries: &mut Vec<Entry>) -> Result<()> {
     let metadata = fs::symlink_metadata(source)?;
-    let kind = if metadata.file_type().is_symlink() {
-        Kind::Symlink
-    } else if metadata.is_dir() {
-        Kind::Directory
-    } else if metadata.is_file() {
-        Kind::File
-    } else {
-        return Err(invalid(format!("unsupported filesystem entry {}", source.display())));
-    };
-    let size = match kind {
-        Kind::File => metadata.len(),
-        Kind::Symlink => symlink_bytes(source)?.len() as u64,
-        Kind::Directory => 0,
-    };
+    let kind = if metadata.file_type().is_symlink() { Kind::Symlink } else if metadata.is_dir() { Kind::Directory } else if metadata.is_file() { Kind::File } else { return Err(invalid(format!("unsupported filesystem entry {}", source.display()))); };
+    let size = match kind { Kind::File => metadata.len(), Kind::Symlink => symlink_bytes(source)?.len() as u64, Kind::Directory => 0 };
     entries.push(Entry {
         source: source.to_path_buf(),
         name: zip_name(archive_path, kind == Kind::Directory)?,
@@ -151,17 +106,12 @@ fn collect(source: &Path, archive_path: &Path, entries: &mut Vec<Entry>) -> Resu
     if kind == Kind::Directory {
         let mut children = fs::read_dir(source)?.map(|entry| entry.map(|entry| entry.path())).collect::<io::Result<Vec<_>>>()?;
         children.sort_unstable();
-        for child in children {
-            collect(&child, &archive_path.join(child.file_name().unwrap()), entries)?;
-        }
+        for child in children { collect(&child, &archive_path.join(child.file_name().unwrap()), entries)?; }
     }
     Ok(())
 }
 
-struct CountingWriter<W> {
-    inner: W,
-    position: u64,
-}
+struct CountingWriter<W> { inner: W, position: u64 }
 
 impl<W: Write> Write for CountingWriter<W> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
@@ -170,20 +120,12 @@ impl<W: Write> Write for CountingWriter<W> {
         Ok(written)
     }
 
-    fn flush(&mut self) -> io::Result<()> {
-        self.inner.flush()
-    }
+    fn flush(&mut self) -> io::Result<()> { self.inner.flush() }
 }
 
-fn push_u16(output: &mut impl Write, value: u16) -> io::Result<()> {
-    output.write_all(&value.to_le_bytes())
-}
-fn push_u32(output: &mut impl Write, value: u32) -> io::Result<()> {
-    output.write_all(&value.to_le_bytes())
-}
-fn push_u64(output: &mut impl Write, value: u64) -> io::Result<()> {
-    output.write_all(&value.to_le_bytes())
-}
+fn push_u16(output: &mut impl Write, value: u16) -> io::Result<()> { output.write_all(&value.to_le_bytes()) }
+fn push_u32(output: &mut impl Write, value: u32) -> io::Result<()> { output.write_all(&value.to_le_bytes()) }
+fn push_u64(output: &mut impl Write, value: u64) -> io::Result<()> { output.write_all(&value.to_le_bytes()) }
 
 fn timestamp_extra(modified: Option<u32>) -> Vec<u8> {
     let Some(modified) = modified else { return Vec::new() };
@@ -195,9 +137,7 @@ fn timestamp_extra(modified: Option<u32>) -> Vec<u8> {
     extra
 }
 
-fn may_need_zip64(size: u64) -> bool {
-    size >= 0xff00_0000
-}
+fn may_need_zip64(size: u64) -> bool { size >= 0xff00_0000 }
 
 fn write_local_header(output: &mut impl Write, entry: &Entry, method: u16, zip64: bool) -> Result<()> {
     let name = entry.name.as_bytes();
@@ -231,7 +171,8 @@ fn write_descriptor(output: &mut impl Write, crc: u32, compressed: u64, uncompre
     if zip64 {
         push_u64(output, compressed)?;
         push_u64(output, uncompressed)?;
-    } else {
+    }
+    else {
         push_u32(output, compressed.try_into().map_err(|_| invalid("compressed ZIP entry unexpectedly requires Zip64"))?)?;
         push_u32(output, uncompressed.try_into().map_err(|_| invalid("ZIP entry unexpectedly requires Zip64"))?)?;
     }
@@ -244,15 +185,9 @@ fn write_central(output: &mut impl Write, entry: &CentralEntry) -> Result<()> {
     let compressed64 = entry.compressed_size > u32::MAX as u64;
     let offset64 = entry.local_offset > u32::MAX as u64;
     let mut zip64_values = Vec::new();
-    if size64 {
-        zip64_values.extend_from_slice(&entry.uncompressed_size.to_le_bytes())
-    }
-    if compressed64 {
-        zip64_values.extend_from_slice(&entry.compressed_size.to_le_bytes())
-    }
-    if offset64 {
-        zip64_values.extend_from_slice(&entry.local_offset.to_le_bytes())
-    }
+    if size64 { zip64_values.extend_from_slice(&entry.uncompressed_size.to_le_bytes()) }
+    if compressed64 { zip64_values.extend_from_slice(&entry.compressed_size.to_le_bytes()) }
+    if offset64 { zip64_values.extend_from_slice(&entry.local_offset.to_le_bytes()) }
     let mut extra = Vec::new();
     if !zip64_values.is_empty() {
         extra.extend_from_slice(&1_u16.to_le_bytes());
@@ -360,9 +295,7 @@ fn write_large<W: Write>(output: &mut CountingWriter<W>, entry: Entry, options: 
 
 fn finish_archive<W: Write>(output: &mut CountingWriter<W>, central: &[CentralEntry]) -> Result<()> {
     let central_start = output.position;
-    for entry in central {
-        write_central(output, entry)?;
-    }
+    for entry in central { write_central(output, entry)?; }
     let central_size = output.position - central_start;
     let zip64 =
         central.iter().any(|entry| entry.zip64) || central.len() > u16::MAX as usize || central_start > u32::MAX as u64 || central_size > u32::MAX as u64;
@@ -398,15 +331,9 @@ fn finish_archive<W: Write>(output: &mut CountingWriter<W>, central: &[CentralEn
 pub fn create_to_writer<W: Write + ?Sized>(inputs: &[PathInput], output: &mut W, options: EncodeOptions) -> Result<EncodeReport> {
     let options = options.validate()?;
     let mut entries = Vec::new();
-    for input in inputs {
-        collect(&input.source, &input.archive_path, &mut entries)?;
-    }
+    for input in inputs { collect(&input.source, &input.archive_path, &mut entries)?; }
     entries.sort_unstable_by(|left, right| left.name.cmp(&right.name));
-    for pair in entries.windows(2) {
-        if pair[0].name == pair[1].name {
-            return Err(invalid(format!("duplicate ZIP path {}", pair[0].name)));
-        }
-    }
+    for pair in entries.windows(2) { if pair[0].name == pair[1].name { return Err(invalid(format!("duplicate ZIP path {}", pair[0].name))); } }
     let input_len = entries.iter().map(|entry| entry.size).sum();
     let file_count = entries.iter().filter(|entry| entry.kind == Kind::File).count();
     let threshold = if file_count == 1 { SINGLE_ENTRY_PARALLEL } else { MULTI_ENTRY_PARALLEL };
@@ -420,14 +347,11 @@ pub fn create_to_writer<W: Write + ?Sized>(inputs: &[PathInput], output: &mut W,
 
     let mut output = CountingWriter { inner: output, position: 0 };
     let mut central = Vec::new();
-    for entry in large {
-        write_large(&mut output, entry, options, &mut central)?;
-    }
+    for entry in large { write_large(&mut output, entry, options, &mut central)?; }
     if options.resolved_threads() == 1 || small.len() <= 1 {
-        for entry in small {
-            write_prepared(&mut output, prepare(entry, options.level_or(6))?, &mut central)?;
-        }
-    } else {
+        for entry in small { write_prepared(&mut output, prepare(entry, options.level_or(6))?, &mut central)?; }
+    }
+    else {
         let pool = ThreadPoolBuilder::new()
             .num_threads(options.resolved_threads())
             .thread_name(|index| format!("fbz-zip-encode-{index}"))
@@ -441,9 +365,7 @@ pub fn create_to_writer<W: Write + ?Sized>(inputs: &[PathInput], output: &mut W,
             |entry| prepare(entry.clone(), options.level_or(6)),
             |result| result.as_ref().map_or(0, |prepared| prepared.bytes.capacity()),
             |results| {
-                for key in 0..jobs.len() {
-                    write_prepared(&mut output, results.take(key)??, &mut central)?;
-                }
+                for key in 0..jobs.len() { write_prepared(&mut output, results.take(key)??, &mut central)?; }
                 Ok(())
             },
         )?;

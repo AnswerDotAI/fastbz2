@@ -14,16 +14,11 @@ pub const MAX_RUN: usize = 4 + 255;
 /// A maximal run of one byte value, capped at [`MAX_RUN`]. This is the atom the
 /// block builder places: a group is never split across blocks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Group {
-    pub byte: u8,
-    pub raw_len: usize,
-}
+pub struct Group { pub byte: u8, pub raw_len: usize }
 
 impl Group {
     /// How many bytes this group occupies in the RLE1 output.
-    pub fn encoded_len(self) -> usize {
-        if self.raw_len >= 4 { 5 } else { self.raw_len }
-    }
+    pub fn encoded_len(self) -> usize { if self.raw_len >= 4 { 5 } else { self.raw_len } }
 
     /// Append the group's encoded form to `out`.
     pub fn write_into(self, out: &mut Vec<u8>) {
@@ -31,11 +26,7 @@ impl Group {
         if self.raw_len >= 4 {
             out.extend_from_slice(&[b, b, b, b]);
             out.push((self.raw_len - 4) as u8);
-        } else {
-            for _ in 0..self.raw_len {
-                out.push(b);
-            }
-        }
+        } else { for _ in 0..self.raw_len { out.push(b); } }
     }
 }
 
@@ -43,15 +34,10 @@ impl Group {
 ///
 /// Incremental by design: a run may span any number of calls, so the caller
 /// never has to buffer plaintext just to find run boundaries.
-pub struct Splitter {
-    byte: u8,
-    len: usize,
-}
+pub struct Splitter { byte: u8, len: usize }
 
 impl Splitter {
-    pub fn new() -> Splitter {
-        Splitter { byte: 0, len: 0 }
-    }
+    pub fn new() -> Splitter { Splitter { byte: 0, len: 0 } }
 
     /// Feed one byte. Returns the group that just closed, if any.
     #[inline]
@@ -67,25 +53,17 @@ impl Splitter {
     }
 
     /// Close the stream, returning the final partial group.
-    pub fn finish(&mut self) -> Option<Group> {
-        self.take()
-    }
+    pub fn finish(&mut self) -> Option<Group> { self.take() }
 
     fn take(&mut self) -> Option<Group> {
-        if self.len == 0 {
-            return None;
-        }
+        if self.len == 0 { return None; }
         let group = Group { byte: self.byte, raw_len: self.len };
         self.len = 0;
         Some(group)
     }
 }
 
-impl Default for Splitter {
-    fn default() -> Self {
-        Splitter::new()
-    }
-}
+impl Default for Splitter { fn default() -> Self { Splitter::new() } }
 
 #[cfg(test)]
 mod tests {
@@ -120,16 +98,12 @@ mod tests {
         let mut count = 0u32;
         for &b in enc {
             if count == 4 {
-                for _ in 0..b {
-                    out.push(prev as u8);
-                }
+                for _ in 0..b { out.push(prev as u8); }
                 count = 0;
                 prev = -1;
             } else {
                 out.push(b);
-                if b as i32 == prev {
-                    count += 1;
-                } else {
+                if b as i32 == prev { count += 1; } else {
                     prev = b as i32;
                     count = 1;
                 }
@@ -187,23 +161,15 @@ mod tests {
     }
 
     #[test]
-    fn handles_empty_input() {
-        assert!(encode(b"").is_empty());
-    }
+    fn handles_empty_input() { assert!(encode(b"").is_empty()); }
 
     #[test]
     fn a_run_never_exceeds_the_cap() {
         let input = vec![b'k'; 5000];
         let mut split = Splitter::new();
         let mut groups = Vec::new();
-        for &b in &input {
-            if let Some(g) = split.push(b) {
-                groups.push(g);
-            }
-        }
-        if let Some(g) = split.finish() {
-            groups.push(g);
-        }
+        for &b in &input { if let Some(g) = split.push(b) { groups.push(g); } }
+        if let Some(g) = split.finish() { groups.push(g); }
         assert!(groups.iter().all(|g| g.raw_len <= MAX_RUN));
         assert_eq!(groups.iter().map(|g| g.raw_len).sum::<usize>(), 5000);
     }
@@ -213,9 +179,7 @@ mod tests {
         let mut input = Vec::new();
         for i in 0..2000u32 {
             let b = (i / 7 % 5) as u8;
-            for _ in 0..(i % 9) {
-                input.push(b);
-            }
+            for _ in 0..(i % 9) { input.push(b); }
         }
         for cut in [0, 1, 2, 3, 4, 5, 100, 1000, input.len()] {
             let slice = &input[..cut.min(input.len())];

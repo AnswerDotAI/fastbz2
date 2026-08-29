@@ -22,10 +22,7 @@ const AUTO_THREAD_LIMIT: usize = 4;
 const MAX_BATCH_BLOCKS: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BlockMode {
-    Independent,
-    Linked,
-}
+pub enum BlockMode { Independent, Linked }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {
@@ -79,9 +76,7 @@ struct FrameHeader {
     content_size: Option<u64>,
 }
 
-fn invalid(message: impl Into<String>) -> Error {
-    Error::InvalidLz4(message.into())
-}
+fn invalid(message: impl Into<String>) -> Error { Error::InvalidLz4(message.into()) }
 
 fn check_output(output: &impl OutputSink) -> Result<()> {
     if output.is_cancelled() { Err(Error::Io(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "output reader stopped reading"))) } else { Ok(()) }
@@ -106,12 +101,8 @@ fn xxhash32(data: &[u8]) -> u32 {
 fn parse_frame_header(data: &[u8], start: usize) -> Result<FrameHeader> {
     let flg = *data.get(start + 4).ok_or_else(|| invalid("truncated frame descriptor"))?;
     let bd = *data.get(start + 5).ok_or_else(|| invalid("truncated frame descriptor"))?;
-    if flg & 0xc0 != 0x40 {
-        return Err(invalid(format!("unsupported frame version bits {:02x}", flg & 0xc0)));
-    }
-    if flg & 0x02 != 0 || bd & 0x8f != 0 {
-        return Err(invalid("reserved frame descriptor bits are set"));
-    }
+    if flg & 0xc0 != 0x40 { return Err(invalid(format!("unsupported frame version bits {:02x}", flg & 0xc0))); }
+    if flg & 0x02 != 0 || bd & 0x8f != 0 { return Err(invalid("reserved frame descriptor bits are set")); }
     let mode = if flg & 0x20 != 0 { BlockMode::Independent } else { BlockMode::Linked };
     let block_checksums = flg & 0x10 != 0;
     let has_content_size = flg & 0x08 != 0;
@@ -129,9 +120,7 @@ fn parse_frame_header(data: &[u8], start: usize) -> Result<FrameHeader> {
         let bytes = data.get(position..position.saturating_add(8)).ok_or_else(|| invalid("truncated frame content size"))?;
         position += 8;
         Some(u64::from_le_bytes(bytes.try_into().unwrap()))
-    } else {
-        None
-    };
+    } else { None };
     if has_dictionary {
         let dictionary = read_u32(data, position, "dictionary ID")?;
         return Err(invalid(format!("external dictionary {dictionary:08x} is not supported")));
@@ -149,9 +138,7 @@ fn parse_frame_header(data: &[u8], start: usize) -> Result<FrameHeader> {
 fn next_block(data: &[u8], position: &mut usize, frame: &FrameHeader) -> Result<Option<BlockLayout>> {
     let value = read_u32(data, *position, "block header")?;
     *position += 4;
-    if value == 0 {
-        return Ok(None);
-    }
+    if value == 0 { return Ok(None); }
     let stored = value & UNCOMPRESSED_BIT != 0;
     let size = (value & !UNCOMPRESSED_BIT) as usize;
     if size == 0 || size > frame.max_block_size {
@@ -164,9 +151,7 @@ fn next_block(data: &[u8], position: &mut usize, frame: &FrameHeader) -> Result<
         let checksum = read_u32(data, *position, "block checksum")?;
         *position += 4;
         Some(checksum)
-    } else {
-        None
-    };
+    } else { None };
     Ok(Some(BlockLayout { data_start, data_end, stored, expected_checksum }))
 }
 
@@ -180,17 +165,13 @@ fn skip_frame(data: &[u8], position: usize) -> Result<usize> {
 }
 
 fn read_length(input: &[u8], position: &mut usize, initial: usize) -> Result<usize> {
-    if initial != 15 {
-        return Ok(initial);
-    }
+    if initial != 15 { return Ok(initial); }
     let mut length = initial;
     loop {
         let extra = *input.get(*position).ok_or_else(|| invalid("truncated extended sequence length"))? as usize;
         *position += 1;
         length = length.checked_add(extra).ok_or_else(|| invalid("sequence length overflows usize"))?;
-        if extra != 255 {
-            return Ok(length);
-        }
+        if extra != 255 { return Ok(length); }
     }
 }
 
@@ -205,9 +186,7 @@ fn copy_match(output: &mut Vec<u8>, dictionary: &[u8], offset: usize, mut length
         output.extend_from_slice(&dictionary[start..start + take]);
         length -= take;
     }
-    if length != 0 {
-        extend_match(output, offset, length);
-    }
+    if length != 0 { extend_match(output, offset, length); }
     Ok(())
 }
 
@@ -224,9 +203,7 @@ fn decompress_block(input: &[u8], dictionary: &[u8], max_output: usize) -> Resul
         }
         output.extend_from_slice(&input[position..literal_end]);
         position = literal_end;
-        if position == input.len() {
-            break;
-        }
+        if position == input.len() { break; }
         let offset_bytes = input.get(position..position.saturating_add(2)).ok_or_else(|| invalid("truncated match offset"))?;
         position += 2;
         let offset = u16::from_le_bytes(offset_bytes.try_into().unwrap()) as usize;
@@ -239,25 +216,12 @@ fn decompress_block(input: &[u8], dictionary: &[u8], max_output: usize) -> Resul
     Ok(output)
 }
 
-enum DecodedBlock {
-    Stored { start: usize, end: usize },
-    Decoded(Vec<u8>),
-}
+enum DecodedBlock { Stored { start: usize, end: usize }, Decoded(Vec<u8>) }
 
 impl DecodedBlock {
-    fn bytes<'a>(&'a self, source: &'a [u8]) -> &'a [u8] {
-        match self {
-            Self::Stored { start, end } => &source[*start..*end],
-            Self::Decoded(bytes) => bytes,
-        }
-    }
+    fn bytes<'a>(&'a self, source: &'a [u8]) -> &'a [u8] { match self { Self::Stored { start, end } => &source[*start..*end], Self::Decoded(bytes) => bytes } }
 
-    fn retained_bytes(&self) -> usize {
-        match self {
-            Self::Stored { .. } => 0,
-            Self::Decoded(bytes) => bytes.capacity(),
-        }
-    }
+    fn retained_bytes(&self) -> usize { match self { Self::Stored { .. } => 0, Self::Decoded(bytes) => bytes.capacity() } }
 }
 
 fn decode_layout_block(data: &[u8], block: &BlockLayout, dictionary: &[u8], max_block_size: usize) -> Result<DecodedBlock> {
@@ -268,11 +232,7 @@ fn decode_layout_block(data: &[u8], block: &BlockLayout, dictionary: &[u8], max_
             return Err(invalid(format!("block checksum mismatch at byte {}: expected {expected:08x}, decoded {actual:08x}", block.data_start)));
         }
     }
-    if block.stored {
-        Ok(DecodedBlock::Stored { start: block.data_start, end: block.data_end })
-    } else {
-        Ok(DecodedBlock::Decoded(decompress_block(encoded, dictionary, max_block_size)?))
-    }
+    if block.stored { Ok(DecodedBlock::Stored { start: block.data_start, end: block.data_end }) } else { Ok(DecodedBlock::Decoded(decompress_block(encoded, dictionary, max_block_size)?)) }
 }
 
 struct FrameCommitter<'a, S, P> {
@@ -289,9 +249,7 @@ struct FrameCommitter<'a, S, P> {
 impl<S: OutputSink, P: FnMut(DecodeProgress)> FrameCommitter<'_, S, P> {
     fn commit(&mut self, layout: &BlockLayout, decoded: DecodedBlock) -> Result<()> {
         let bytes = decoded.bytes(self.data);
-        if let Some(hasher) = &mut self.hasher {
-            hasher.write(bytes);
-        }
+        if let Some(hasher) = &mut self.hasher { hasher.write(bytes); }
         let decoded_len = bytes.len() as u64;
         match decoded {
             DecodedBlock::Stored { start, end } => self.output.write_borrowed(&self.data[start..end])?,
@@ -342,9 +300,7 @@ fn decode_independent<S: OutputSink, P: FnMut(DecodeProgress)>(
                 Ok(Some(block)) => {
                     estimated_work = estimated_work.saturating_add(if block.stored {
                         if block.expected_checksum.is_some() { block.data_end - block.data_start } else { 0 }
-                    } else {
-                        frame.max_block_size
-                    });
+                    } else { frame.max_block_size });
                     batch.push(block);
                 }
                 Ok(None) => {
@@ -358,12 +314,7 @@ fn decode_independent<S: OutputSink, P: FnMut(DecodeProgress)>(
                 }
             }
         }
-        if batch.is_empty() {
-            return match parse_error {
-                Some(error) => Err(error),
-                None => Ok(()),
-            };
-        }
+        if batch.is_empty() { return match parse_error { Some(error) => Err(error), None => Ok(()) }; }
         let parallel_work =
             batch.len() >= 2 && estimated_work >= MIN_PARALLEL_INPUT && batch.iter().any(|block| !block.stored || block.expected_checksum.is_some());
         if !parallel_work {
@@ -371,7 +322,8 @@ fn decode_independent<S: OutputSink, P: FnMut(DecodeProgress)>(
                 let decoded = decode_layout_block(data, &block, &[], frame.max_block_size)?;
                 committer.commit(&block, decoded)?;
             }
-        } else {
+        }
+        else {
             if pool.is_none() {
                 *pool = Some(
                     ThreadPoolBuilder::new()
@@ -395,16 +347,12 @@ fn decode_independent<S: OutputSink, P: FnMut(DecodeProgress)>(
                 |block| decode_layout_block(data, block, &[], frame.max_block_size),
                 |result| result.as_ref().map_or(0, DecodedBlock::retained_bytes),
                 |results| {
-                    for (key, block) in batch.iter().enumerate() {
-                        committer.commit(block, results.take(key)??)?;
-                    }
+                    for (key, block) in batch.iter().enumerate() { committer.commit(block, results.take(key)??)?; }
                     Ok(())
                 },
             )?;
         }
-        if let Some(error) = parse_error {
-            return Err(error);
-        }
+        if let Some(error) = parse_error { return Err(error); }
     }
     Ok(())
 }
@@ -416,9 +364,7 @@ fn update_history(history: &mut Vec<u8>, bytes: &[u8]) {
         return;
     }
     let excess = history.len().saturating_add(bytes.len()).saturating_sub(WINDOW_SIZE);
-    if excess != 0 {
-        history.drain(..excess);
-    }
+    if excess != 0 { history.drain(..excess); }
     history.extend_from_slice(bytes);
 }
 
@@ -439,9 +385,7 @@ fn decode_linked<S: OutputSink, P: FnMut(DecodeProgress)>(
     Ok(())
 }
 
-pub fn decompress(data: &[u8]) -> Result<Vec<u8>> {
-    decompress_with_options(data, DecodeOptions::default())
-}
+pub fn decompress(data: &[u8]) -> Result<Vec<u8>> { decompress_with_options(data, DecodeOptions::default()) }
 
 pub fn decompress_with_options(data: &[u8], options: DecodeOptions) -> Result<Vec<u8>> {
     let mut output = Vec::new();
@@ -491,12 +435,8 @@ pub fn decompress_to_sink_with_options_and_progress<S: OutputSink, P: FnMut(Deco
             position = skip_frame(data, position)?;
             continue;
         }
-        if magic == LEGACY_MAGIC {
-            return Err(invalid("legacy LZ4 frames are not supported"));
-        }
-        if magic != FRAME_MAGIC {
-            return Err(invalid(format!("wrong magic {magic:08x} at byte {position}")));
-        }
+        if magic == LEGACY_MAGIC { return Err(invalid("legacy LZ4 frames are not supported")); }
+        if magic != FRAME_MAGIC { return Err(invalid(format!("wrong magic {magic:08x} at byte {position}"))); }
         let frame_number = frames.len();
         let frame = parse_frame_header(data, position)?;
         position = frame.blocks_start;
@@ -518,16 +458,12 @@ pub fn decompress_to_sink_with_options_and_progress<S: OutputSink, P: FnMut(Deco
             }
             if let Some(expected) = frame.content_size
                 && committer.decoded != expected
-            {
-                return Err(invalid(format!("content size mismatch: expected {expected}, decoded {}", committer.decoded)));
-            }
+            { return Err(invalid(format!("content size mismatch: expected {expected}, decoded {}", committer.decoded))); }
             if frame.content_checksum {
                 let expected = read_u32(data, position, "content checksum")?;
                 position += 4;
                 let actual = committer.hasher.take().unwrap().finish() as u32;
-                if actual != expected {
-                    return Err(invalid(format!("content checksum mismatch: expected {expected:08x}, decoded {actual:08x}")));
-                }
+                if actual != expected { return Err(invalid(format!("content checksum mismatch: expected {expected:08x}, decoded {actual:08x}"))); }
             }
             committer.decoded
         };
@@ -547,9 +483,7 @@ pub fn decompress_to_sink_with_options_and_progress<S: OutputSink, P: FnMut(Deco
         });
         progress(DecodeProgress { compressed_bytes: position as u64, decoded_bytes: decoded_total });
     }
-    if frames.is_empty() {
-        return Err(invalid("input contains no LZ4 frames"));
-    }
+    if frames.is_empty() { return Err(invalid("input contains no LZ4 frames")); }
     output.flush()?;
     progress(DecodeProgress { compressed_bytes: data.len() as u64, decoded_bytes: decoded_total });
     Ok(Report { source_len: data.len() as u64, decoded_len: decoded_total, frames, blocks })
@@ -581,9 +515,7 @@ mod tests {
         for mode in [OracleMode::Independent, OracleMode::Linked] {
             for checksums in [false, true] {
                 let encoded = oracle_frame(&data, mode, checksums, checksums);
-                for threads in [1, 4] {
-                    assert_eq!(decompress_with_options(&encoded, DecodeOptions { threads, ..DecodeOptions::default() }).unwrap(), data);
-                }
+                for threads in [1, 4] { assert_eq!(decompress_with_options(&encoded, DecodeOptions { threads, ..DecodeOptions::default() }).unwrap(), data); }
             }
         }
     }

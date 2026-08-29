@@ -13,9 +13,7 @@ use support::simplewiki_prefix;
 
 const DECODED_LEN: u64 = 84_423_012;
 
-fn fixture(extension: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("meta/simplewiki-first-5pct.xml.{extension}"))
-}
+fn fixture(extension: &str) -> PathBuf { Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("meta/simplewiki-first-5pct.xml.{extension}")) }
 
 fn reader_run(path: &Path) -> (Duration, u64) {
     let started = Instant::now();
@@ -24,11 +22,7 @@ fn reader_run(path: &Path) -> (Duration, u64) {
     (started.elapsed(), decoded)
 }
 
-enum Codec {
-    Bzip2,
-    Gzip,
-    Lz4,
-}
+enum Codec { Bzip2, Gzip, Lz4 }
 
 fn writer_run(path: &Path, codec: Codec) -> Duration {
     let started = Instant::now();

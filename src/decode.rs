@@ -12,10 +12,7 @@ use crate::{
 pub const DEFAULT_MEMORY_LIMIT: usize = 1024 * 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct DecodeProgress {
-    pub compressed_bytes: u64,
-    pub decoded_bytes: u64,
-}
+pub struct DecodeProgress { pub compressed_bytes: u64, pub decoded_bytes: u64 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct DecodeOptions {
@@ -27,16 +24,10 @@ pub struct DecodeOptions {
     pub memory_limit: usize,
 }
 
-impl Default for DecodeOptions {
-    fn default() -> Self {
-        Self { format: DecodeFormat::Auto, threads: 0, memory_limit: DEFAULT_MEMORY_LIMIT }
-    }
-}
+impl Default for DecodeOptions { fn default() -> Self { Self { format: DecodeFormat::Auto, threads: 0, memory_limit: DEFAULT_MEMORY_LIMIT } } }
 
 impl DecodeOptions {
-    pub fn resolved_threads(self) -> usize {
-        if self.threads != 0 { self.threads } else { thread::available_parallelism().map(usize::from).unwrap_or(1) }
-    }
+    pub fn resolved_threads(self) -> usize { if self.threads != 0 { self.threads } else { thread::available_parallelism().map(usize::from).unwrap_or(1) } }
 
     pub(crate) fn validate(self) -> Result<Self> {
         if self.memory_limit < MAX_DECODED_BLOCK {
@@ -47,19 +38,9 @@ impl DecodeOptions {
 }
 
 #[derive(Clone, Debug)]
-enum Marker {
-    Block(BlockCandidate),
-    End(EndCandidate),
-}
+enum Marker { Block(BlockCandidate), End(EndCandidate) }
 
-impl Marker {
-    fn bit_offset(&self) -> u64 {
-        match self {
-            Self::Block(block) => block.bit_offset,
-            Self::End(end) => end.bit_offset,
-        }
-    }
-}
+impl Marker { fn bit_offset(&self) -> u64 { match self { Self::Block(block) => block.bit_offset, Self::End(end) => end.bit_offset } } }
 
 pub fn decompress(data: &[u8], options: DecodeOptions) -> Result<Vec<u8>> {
     let mut output = Vec::new();
@@ -95,20 +76,14 @@ pub fn decompress_to_sink_with_progress(
     let prefetched = if data.get(4..10) == Some(&[0x31, 0x41, 0x59, 0x26, 0x53, 0x59]) {
         let level = parse_header(data, 0)?;
         let (expected_crc, mut decoded) = decoder::decode_first_candidate(data)?;
-        if decoded.block_len > usize::from(level) * 100_000 {
-            return Err(Error::Decode { bit_offset: 32, source: DecodeError::BlockOverflow });
-        }
+        if decoded.block_len > usize::from(level) * 100_000 { return Err(Error::Decode { bit_offset: 32, source: DecodeError::BlockOverflow }); }
         output.write_owned_from(std::mem::take(&mut decoded.output), 0)?;
         Some(PrefetchedCandidate { bit_offset: 32, expected_crc, decoded })
-    } else {
-        None
-    };
+    } else { None };
     decode_to_sink_impl_with_prefetched(data, output, options, &mut progress, prefetched).map(|_| ())
 }
 
-pub fn build_index(data: &[u8], options: DecodeOptions) -> Result<Index> {
-    build_index_with_progress(data, options, |_| {})
-}
+pub fn build_index(data: &[u8], options: DecodeOptions) -> Result<Index> { build_index_with_progress(data, options, |_| {}) }
 
 pub fn build_index_with_progress(data: &[u8], options: DecodeOptions, mut progress: impl FnMut(DecodeProgress)) -> Result<Index> {
     let mut output = WriterSink::new(std::io::sink());
@@ -131,11 +106,7 @@ fn decode_to_sink_impl(data: &[u8], output: &mut impl OutputSink, options: Decod
     decode_to_sink_impl_with_prefetched(data, output, options, progress, None)
 }
 
-struct PrefetchedCandidate {
-    bit_offset: u64,
-    expected_crc: u32,
-    decoded: decoder::DecodedCandidate,
-}
+struct PrefetchedCandidate { bit_offset: u64, expected_crc: u32, decoded: decoder::DecodedCandidate }
 
 fn decode_to_sink_impl_with_prefetched(
     data: &[u8],
@@ -153,9 +124,7 @@ fn decode_to_sink_impl_with_prefetched(
     markers.sort_unstable_by_key(Marker::bit_offset);
     markers.dedup_by_key(|marker| marker.bit_offset());
 
-    if markers.len() > data.len() / 16 + 64 {
-        return Err(Error::InvalidConfiguration("input contains too many speculative markers".into()));
-    }
+    if markers.len() > data.len() / 16 + 64 { return Err(Error::InvalidConfiguration("input contains too many speculative markers".into())); }
 
     let prefetched = prefetched
         .map(|prefetched| {
@@ -222,9 +191,7 @@ fn assemble(
         loop {
             match &markers[marker_index] {
                 Marker::End(end) => {
-                    if end.expected_stream_crc != combined_crc {
-                        return Err(Error::Decode { bit_offset: end.bit_offset, source: DecodeError::CrcMismatch });
-                    }
+                    if end.expected_stream_crc != combined_crc { return Err(Error::Decode { bit_offset: end.bit_offset, source: DecodeError::CrcMismatch }); }
                     let after_eos = end.bit_offset.checked_add(80).ok_or_else(offset_overflow)?;
                     header_byte = after_eos.checked_add(7).ok_or_else(offset_overflow)? / 8;
                     streams.push(StreamIndex {
@@ -264,12 +231,8 @@ fn assemble(
                 }
             }
         }
-        if header_byte == data.len() as u64 {
-            break;
-        }
-        if header_byte > data.len() as u64 {
-            return Err(Error::Decode { bit_offset: data.len() as u64 * 8, source: DecodeError::Truncated });
-        }
+        if header_byte == data.len() as u64 { break; }
+        if header_byte > data.len() as u64 { return Err(Error::Decode { bit_offset: data.len() as u64 * 8, source: DecodeError::Truncated }); }
     }
 
     output.flush()?;
@@ -282,10 +245,7 @@ trait Candidates {
     fn discard_before(&mut self, marker_index: usize);
 }
 
-struct SerialCandidates<'a> {
-    data: &'a [u8],
-    markers: &'a [Marker],
-}
+struct SerialCandidates<'a> { data: &'a [u8], markers: &'a [Marker] }
 
 impl Candidates for SerialCandidates<'_> {
     fn take(&mut self, marker_index: usize) -> Result<decoder::DecodedCandidate> {
@@ -297,14 +257,9 @@ impl Candidates for SerialCandidates<'_> {
 }
 
 #[derive(Clone, Copy)]
-struct CandidateJob {
-    start_bit: u64,
-    expected_crc: u32,
-}
+struct CandidateJob { start_bit: u64, expected_crc: u32 }
 
-fn candidate_len(result: &Result<decoder::DecodedCandidate>) -> usize {
-    result.as_ref().map_or(0, |decoded| decoded.output.len())
-}
+fn candidate_len(result: &Result<decoder::DecodedCandidate>) -> usize { result.as_ref().map_or(0, |decoded| decoded.output.len()) }
 
 struct ParallelCandidates<'results, 'pipeline> {
     results: &'results mut OrderedResults<'pipeline, Result<decoder::DecodedCandidate>>,
@@ -313,24 +268,18 @@ struct ParallelCandidates<'results, 'pipeline> {
 
 impl Candidates for ParallelCandidates<'_, '_> {
     fn take(&mut self, marker_index: usize) -> Result<decoder::DecodedCandidate> {
-        if self.prefetched.as_ref().is_some_and(|(prefetched_index, _)| *prefetched_index == marker_index) {
-            return Ok(self.prefetched.take().unwrap().1);
-        }
+        if self.prefetched.as_ref().is_some_and(|(prefetched_index, _)| *prefetched_index == marker_index) { return Ok(self.prefetched.take().unwrap().1); }
         self.results.take(marker_index)?
     }
 
     fn discard_before(&mut self, marker_index: usize) {
-        if self.prefetched.as_ref().is_some_and(|(prefetched_index, _)| *prefetched_index < marker_index) {
-            self.prefetched.take();
-        }
+        if self.prefetched.as_ref().is_some_and(|(prefetched_index, _)| *prefetched_index < marker_index) { self.prefetched.take(); }
         self.results.discard_before(marker_index);
     }
 }
 
 pub(crate) fn thread_pool(threads: usize) -> Result<Option<Arc<ThreadPool>>> {
-    if threads <= 1 {
-        return Ok(None);
-    }
+    if threads <= 1 { return Ok(None); }
     ThreadPoolBuilder::new()
         .num_threads(threads)
         .thread_name(|number| format!("fbz-{number}"))
@@ -349,19 +298,13 @@ fn parse_header(data: &[u8], byte_offset: u64) -> Result<u8> {
     let Some(header) = data.get(offset..offset.saturating_add(4)) else {
         return Err(Error::Decode { bit_offset: byte_offset.saturating_mul(8), source: DecodeError::Truncated });
     };
-    if &header[..3] != b"BZh" {
-        return Err(Error::Decode { bit_offset: byte_offset * 8, source: DecodeError::InvalidMagic });
-    }
-    if !(b'1'..=b'9').contains(&header[3]) {
-        return Err(Error::Decode { bit_offset: byte_offset * 8 + 24, source: DecodeError::InvalidLevel });
-    }
+    if &header[..3] != b"BZh" { return Err(Error::Decode { bit_offset: byte_offset * 8, source: DecodeError::InvalidMagic }); }
+    if !(b'1'..=b'9').contains(&header[3]) { return Err(Error::Decode { bit_offset: byte_offset * 8 + 24, source: DecodeError::InvalidLevel }); }
     Ok(header[3] - b'0')
 }
 
 fn current_stream_header(current_bit: u64, first_block: u64, blocks: &[BlockIndex], next_header: u64) -> u64 {
-    if let Some(first) = blocks.get(first_block as usize) {
-        (first.compressed_start_bit - 32) / 8
-    } else {
+    if let Some(first) = blocks.get(first_block as usize) { (first.compressed_start_bit - 32) / 8 } else {
         // Empty streams have no block from which to derive the header. `current_bit`
         // is their EOS position, exactly 32 bits after the header.
         let candidate = current_bit.saturating_sub(32) / 8;
@@ -369,22 +312,16 @@ fn current_stream_header(current_bit: u64, first_block: u64, blocks: &[BlockInde
     }
 }
 
-fn required_marker(bit_offset: u64) -> Error {
-    Error::Decode { bit_offset, source: DecodeError::InvalidMagic }
-}
+fn required_marker(bit_offset: u64) -> Error { Error::Decode { bit_offset, source: DecodeError::InvalidMagic } }
 
-fn offset_overflow() -> Error {
-    Error::InvalidConfiguration("offset arithmetic overflow".into())
-}
+fn offset_overflow() -> Error { Error::InvalidConfiguration("offset arithmetic overflow".into()) }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crabz2::{Level, compress};
 
-    fn patterned(size: usize) -> Vec<u8> {
-        (0..size).map(|index| ((index * 37 + index / 251) & 255) as u8).collect()
-    }
+    fn patterned(size: usize) -> Vec<u8> { (0..size).map(|index| ((index * 37 + index / 251) & 255) as u8).collect() }
 
     #[test]
     fn decodes_multiple_blocks_at_every_thread_setting() {

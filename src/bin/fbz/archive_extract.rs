@@ -20,28 +20,20 @@ fn children(path: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(result)
 }
 
-fn existing_error(path: &Path) -> Error {
-    Error::Io(io::Error::new(io::ErrorKind::AlreadyExists, format!("{} already exists (use --force)", path.display())))
-}
+fn existing_error(path: &Path) -> Error { Error::Io(io::Error::new(io::ErrorKind::AlreadyExists, format!("{} already exists (use --force)", path.display()))) }
 
 fn directory_collision(path: &Path) -> Error {
     Error::Io(io::Error::new(io::ErrorKind::AlreadyExists, format!("refusing to replace directory {} with an archive entry", path.display())))
 }
 
 fn preflight(source: &Path, target: &Path, overwrite: bool) -> Result<()> {
-    let Some(target_metadata) = path_metadata(target)? else {
-        return Ok(());
-    };
+    let Some(target_metadata) = path_metadata(target)? else { return Ok(()); };
     let source_metadata = fs::symlink_metadata(source)?;
     if source_metadata.is_dir() && target_metadata.is_dir() {
-        for child in children(source)? {
-            preflight(&child, &target.join(child.file_name().unwrap()), overwrite)?;
-        }
+        for child in children(source)? { preflight(&child, &target.join(child.file_name().unwrap()), overwrite)?; }
         return Ok(());
     }
-    if target_metadata.is_dir() {
-        return Err(directory_collision(target));
-    }
+    if target_metadata.is_dir() { return Err(directory_collision(target)); }
     if overwrite { Ok(()) } else { Err(existing_error(target)) }
 }
 
@@ -66,18 +58,12 @@ fn commit_entry(source: &Path, target: &Path, overwrite: bool) -> Result<()> {
     };
     if source_metadata.is_dir() && target_metadata.is_dir() {
         make_directory_mutable(source, &source_metadata)?;
-        for child in children(source)? {
-            commit_entry(&child, &target.join(child.file_name().unwrap()), overwrite)?;
-        }
+        for child in children(source)? { commit_entry(&child, &target.join(child.file_name().unwrap()), overwrite)?; }
         fs::remove_dir(source)?;
         return Ok(());
     }
-    if target_metadata.is_dir() {
-        return Err(directory_collision(target));
-    }
-    if !overwrite {
-        return Err(existing_error(target));
-    }
+    if target_metadata.is_dir() { return Err(directory_collision(target)); }
+    if !overwrite { return Err(existing_error(target)); }
     fs::remove_file(target)?;
     fs::rename(source, target)?;
     Ok(())
@@ -96,15 +82,9 @@ pub(super) fn staging(destination: &Path) -> Result<TempDir> {
 }
 
 pub(super) fn commit(staging: &Path, destination: &Path, overwrite: bool) -> Result<()> {
-    if path_metadata(destination)?.is_none() {
-        fs::create_dir(destination)?;
-    }
+    if path_metadata(destination)?.is_none() { fs::create_dir(destination)?; }
     let entries = children(staging)?;
-    for source in &entries {
-        preflight(source, &destination.join(source.file_name().unwrap()), overwrite)?;
-    }
-    for source in entries {
-        commit_entry(&source, &destination.join(source.file_name().unwrap()), overwrite)?;
-    }
+    for source in &entries { preflight(source, &destination.join(source.file_name().unwrap()), overwrite)?; }
+    for source in entries { commit_entry(&source, &destination.join(source.file_name().unwrap()), overwrite)?; }
     Ok(())
 }

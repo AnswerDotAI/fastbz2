@@ -45,15 +45,7 @@ pub struct Coding {
 }
 
 /// Choose the table count the way bzip2 does, from the symbol count.
-fn group_count(n_syms: usize) -> usize {
-    match n_syms {
-        0..=199 => 2,
-        200..=599 => 3,
-        600..=1199 => 4,
-        1200..=2399 => 5,
-        _ => 6,
-    }
-}
+fn group_count(n_syms: usize) -> usize { match n_syms { 0..=199 => 2, 200..=599 => 3, 600..=1199 => 4, 1200..=2399 => 5, _ => 6 } }
 
 /// Build the grouped Huffman coding for one block's symbol stream.
 pub fn build(syms: &[u16], alpha_size: usize) -> Coding {
@@ -69,9 +61,7 @@ pub fn build(syms: &[u16], alpha_size: usize) -> Coding {
         for (g, &t) in selectors.iter().enumerate() {
             let start = g * GROUP_SIZE;
             let end = (start + GROUP_SIZE).min(syms.len());
-            for &s in &syms[start..end] {
-                rfreq[t as usize][s as usize] += 1;
-            }
+            for &s in &syms[start..end] { rfreq[t as usize][s as usize] += 1; }
         }
         for (t, len) in lens.iter_mut().enumerate() {
             // A zero-frequency symbol still needs a code: the delta encoding
@@ -115,9 +105,7 @@ fn assign_selectors(syms: &[u16], lens: &[Vec<u8>]) -> Vec<u8> {
 /// frequency — libbz2's starting point, which the refinement passes then move.
 fn initial_lengths(syms: &[u16], alpha_size: usize, n_groups: usize) -> Vec<Vec<u8>> {
     let mut freq = vec![0u32; alpha_size];
-    for &s in syms {
-        freq[s as usize] += 1;
-    }
+    for &s in syms { freq[s as usize] += 1; }
 
     let mut lens = vec![vec![0u8; alpha_size]; n_groups];
     let mut remaining: u32 = syms.len() as u32;
@@ -138,9 +126,7 @@ fn initial_lengths(syms: &[u16], alpha_size: usize, n_groups: usize) -> Vec<Vec<
             acc -= freq[ge as usize];
             ge -= 1;
         }
-        for (v, slot) in lens[n_part - 1].iter_mut().enumerate() {
-            *slot = if v as isize >= gs as isize && v as isize <= ge { 1 } else { 15 };
-        }
+        for (v, slot) in lens[n_part - 1].iter_mut().enumerate() { *slot = if v as isize >= gs as isize && v as isize <= ge { 1 } else { 15 }; }
         n_part -= 1;
         gs = (ge + 1) as usize;
         remaining -= acc;
@@ -213,9 +199,7 @@ pub fn package_merge(weights: &[u64], limit: u8) -> Vec<u8> {
     for &node in level.iter().take(2 * m - 2) {
         stack.push(node);
         while let Some(nd) = stack.pop() {
-            if left[nd as usize] == NONE {
-                lens[right[nd as usize] as usize] += 1;
-            } else {
+            if left[nd as usize] == NONE { lens[right[nd as usize] as usize] += 1; } else {
                 stack.push(left[nd as usize]);
                 stack.push(right[nd as usize]);
             }
@@ -252,9 +236,7 @@ pub fn write_selectors(w: &mut BitWriter, selectors: &[u8], n_groups: usize) {
     let mut pos: Vec<u8> = (0..n_groups as u8).collect();
     for &sel in selectors {
         let j = pos.iter().position(|&p| p == sel).expect("unknown selector");
-        for _ in 0..j {
-            w.write_bit(1);
-        }
+        for _ in 0..j { w.write_bit(1); }
         w.write_bit(0);
         let v = pos[j];
         pos.copy_within(0..j, 1);

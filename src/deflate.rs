@@ -30,6 +30,4 @@ pub fn decompress_to_sink_with_options_and_progress(
     output: &mut impl OutputSink,
     options: DecodeOptions,
     progress: impl FnMut(DecodeProgress),
-) -> Result<Report> {
-    gzip::decompress_deflate_to_sink_with_options_and_progress(data, output, options, progress)
-}
+) -> Result<Report> { gzip::decompress_deflate_to_sink_with_options_and_progress(data, output, options, progress) }

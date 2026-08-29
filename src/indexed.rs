@@ -16,9 +16,7 @@ pub struct IndexedReader {
 }
 
 impl IndexedReader {
-    pub fn open(path: impl AsRef<Path>, options: DecodeOptions) -> Result<Self> {
-        Self::from_source(Source::open(path)?, None, options, DEFAULT_CACHE_LIMIT)
-    }
+    pub fn open(path: impl AsRef<Path>, options: DecodeOptions) -> Result<Self> { Self::from_source(Source::open(path)?, None, options, DEFAULT_CACHE_LIMIT) }
 
     pub fn open_with_index(path: impl AsRef<Path>, index_path: impl AsRef<Path>, cache_limit: usize) -> Result<Self> {
         let source = Source::open(path)?;
@@ -26,9 +24,7 @@ impl IndexedReader {
         Self::from_source(source, Some(index), DecodeOptions::default(), cache_limit)
     }
 
-    pub fn from_bytes(data: Vec<u8>, options: DecodeOptions) -> Result<Self> {
-        Self::from_source(Source::from_bytes(data), None, options, DEFAULT_CACHE_LIMIT)
-    }
+    pub fn from_bytes(data: Vec<u8>, options: DecodeOptions) -> Result<Self> { Self::from_source(Source::from_bytes(data), None, options, DEFAULT_CACHE_LIMIT) }
 
     pub fn from_bytes_with_index(data: Vec<u8>, encoded_index: &[u8], cache_limit: usize) -> Result<Self> {
         let source = Source::from_bytes(data);
@@ -37,28 +33,17 @@ impl IndexedReader {
     }
 
     pub fn from_source(source: Source, index: Option<Index>, options: DecodeOptions, cache_limit: usize) -> Result<Self> {
-        let index = match index {
-            Some(index) => index,
-            None => build_index(source.as_slice(), options)?,
-        };
+        let index = match index { Some(index) => index, None => build_index(source.as_slice(), options)? };
         Ok(Self { source, index, position: 0, cache: BlockCache::new(cache_limit) })
     }
 
-    pub fn index(&self) -> &Index {
-        &self.index
-    }
+    pub fn index(&self) -> &Index { &self.index }
 
-    pub fn size(&self) -> u64 {
-        self.index.decoded_len
-    }
+    pub fn size(&self) -> u64 { self.index.decoded_len }
 
-    pub fn position(&self) -> u64 {
-        self.position
-    }
+    pub fn position(&self) -> u64 { self.position }
 
-    pub fn save_index(&self, path: impl AsRef<Path>) -> Result<()> {
-        self.index.save(path)
-    }
+    pub fn save_index(&self, path: impl AsRef<Path>) -> Result<()> { self.index.save(path) }
 
     fn block_number(&self, position: u64) -> Option<usize> {
         let number = self.index.blocks.partition_point(|block| block.decoded_start + block.decoded_len <= position);
@@ -76,9 +61,7 @@ impl IndexedReader {
         }
         let stream = &self.index.streams[block.stream as usize];
         let decoded = decode_block(self.source.as_slice(), block.compressed_start_bit, block.compressed_end_bit, stream.block_size_100k, block.expected_crc)?;
-        if decoded.len() as u64 != block.decoded_len {
-            return Err(Error::InvalidIndex("decoded block length does not match index".into()));
-        }
+        if decoded.len() as u64 != block.decoded_len { return Err(Error::InvalidIndex("decoded block length does not match index".into())); }
         let count = output.len().min(decoded.len() - offset);
         output[..count].copy_from_slice(&decoded[offset..offset + count]);
         self.cache.insert(number, decoded);
@@ -92,9 +75,7 @@ impl Read for IndexedReader {
         while !output.is_empty() && self.position < self.index.decoded_len {
             let number = self.block_number(self.position).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "index has a decoded gap"))?;
             let count = self.read_block_part(number, output).map_err(io::Error::other)?;
-            if count == 0 {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "decoder made no progress"));
-            }
+            if count == 0 { return Err(io::Error::new(io::ErrorKind::InvalidData, "decoder made no progress")); }
             self.position += count as u64;
             output = &mut output[count..];
         }
@@ -125,28 +106,20 @@ struct BlockCache {
 }
 
 impl BlockCache {
-    fn new(limit: usize) -> Self {
-        Self { entries: HashMap::new(), order: VecDeque::new(), bytes: 0, limit }
-    }
+    fn new(limit: usize) -> Self { Self { entries: HashMap::new(), order: VecDeque::new(), bytes: 0, limit } }
 
     fn get(&mut self, number: usize) -> Option<&Vec<u8>> {
-        if !self.entries.contains_key(&number) {
-            return None;
-        }
+        if !self.entries.contains_key(&number) { return None; }
         self.order.retain(|&entry| entry != number);
         self.order.push_back(number);
         self.entries.get(&number)
     }
 
     fn insert(&mut self, number: usize, data: Vec<u8>) {
-        if data.len() > self.limit {
-            return;
-        }
+        if data.len() > self.limit { return; }
         while self.bytes + data.len() > self.limit {
             let Some(oldest) = self.order.pop_front() else { break };
-            if let Some(removed) = self.entries.remove(&oldest) {
-                self.bytes -= removed.len();
-            }
+            if let Some(removed) = self.entries.remove(&oldest) { self.bytes -= removed.len(); }
         }
         self.bytes += data.len();
         self.order.push_back(number);

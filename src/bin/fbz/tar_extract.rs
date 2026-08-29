@@ -4,9 +4,7 @@ use fbz::{Error, PipeWriter, Result, output_pipe};
 
 use super::archive_extract;
 
-fn broken_pipe(error: &Error) -> bool {
-    matches!(error, Error::Io(source) if source.kind() == io::ErrorKind::BrokenPipe)
-}
+fn broken_pipe(error: &Error) -> bool { matches!(error, Error::Io(source) if source.kind() == io::ErrorKind::BrokenPipe) }
 
 pub(super) fn unpack<F>(destination: &Path, overwrite: bool, decode: F) -> Result<()>
 where

@@ -20,89 +20,53 @@ pub trait OutputSink {
         self.write_borrowed(suffix)
     }
 
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
+    fn flush(&mut self) -> io::Result<()> { Ok(()) }
 
     /// Report whether the downstream consumer has stopped accepting output.
-    fn is_cancelled(&self) -> bool {
-        false
-    }
+    fn is_cancelled(&self) -> bool { false }
 }
 
 impl<S: OutputSink + ?Sized> OutputSink for &mut S {
-    fn write_borrowed(&mut self, bytes: &[u8]) -> io::Result<()> {
-        (**self).write_borrowed(bytes)
-    }
+    fn write_borrowed(&mut self, bytes: &[u8]) -> io::Result<()> { (**self).write_borrowed(bytes) }
 
-    fn write_owned_from(&mut self, bytes: Vec<u8>, start: usize) -> io::Result<()> {
-        (**self).write_owned_from(bytes, start)
-    }
+    fn write_owned_from(&mut self, bytes: Vec<u8>, start: usize) -> io::Result<()> { (**self).write_owned_from(bytes, start) }
 
-    fn flush(&mut self) -> io::Result<()> {
-        (**self).flush()
-    }
+    fn flush(&mut self) -> io::Result<()> { (**self).flush() }
 
-    fn is_cancelled(&self) -> bool {
-        (**self).is_cancelled()
-    }
+    fn is_cancelled(&self) -> bool { (**self).is_cancelled() }
 }
 
 /// Adapts any `std::io::Write` destination to an `OutputSink`.
-pub struct WriterSink<W> {
-    writer: W,
-}
+pub struct WriterSink<W> { writer: W }
 
-impl<W> WriterSink<W> {
-    pub fn new(writer: W) -> Self {
-        Self { writer }
-    }
-}
+impl<W> WriterSink<W> { pub fn new(writer: W) -> Self { Self { writer } } }
 
 impl<W: Write> OutputSink for WriterSink<W> {
-    fn write_borrowed(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.writer.write_all(bytes)
-    }
+    fn write_borrowed(&mut self, bytes: &[u8]) -> io::Result<()> { self.writer.write_all(bytes) }
 
-    fn flush(&mut self) -> io::Result<()> {
-        self.writer.flush()
-    }
+    fn flush(&mut self) -> io::Result<()> { self.writer.flush() }
 }
 
-struct Chunk {
-    bytes: Vec<u8>,
-    offset: usize,
-}
+struct Chunk { bytes: Vec<u8>, offset: usize }
 
 /// The producing side of a bounded owned-chunk output pipe.
 #[doc(hidden)]
-pub struct PipeWriter {
-    sender: SyncSender<Chunk>,
-    cancelled: Arc<AtomicBool>,
-}
+pub struct PipeWriter { sender: SyncSender<Chunk>, cancelled: Arc<AtomicBool> }
 
 impl PipeWriter {
     fn send(&self, bytes: Vec<u8>, offset: usize) -> io::Result<()> {
         let suffix = bytes.get(offset..).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "owned chunk start exceeds its length"))?;
-        if suffix.is_empty() {
-            return Ok(());
-        }
+        if suffix.is_empty() { return Ok(()); }
         self.sender.send(Chunk { bytes, offset }).map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "output reader stopped reading"))
     }
 }
 
 impl OutputSink for PipeWriter {
-    fn write_borrowed(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.send(bytes.to_vec(), 0)
-    }
+    fn write_borrowed(&mut self, bytes: &[u8]) -> io::Result<()> { self.send(bytes.to_vec(), 0) }
 
-    fn write_owned_from(&mut self, bytes: Vec<u8>, start: usize) -> io::Result<()> {
-        self.send(bytes, start)
-    }
+    fn write_owned_from(&mut self, bytes: Vec<u8>, start: usize) -> io::Result<()> { self.send(bytes, start) }
 
-    fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Relaxed)
-    }
+    fn is_cancelled(&self) -> bool { self.cancelled.load(Ordering::Relaxed) }
 }
 
 /// The consuming side of a bounded owned-chunk output pipe.
@@ -114,17 +78,11 @@ pub struct PipeReader {
     cancelled: Arc<AtomicBool>,
 }
 
-impl Drop for PipeReader {
-    fn drop(&mut self) {
-        self.cancelled.store(true, Ordering::Relaxed);
-    }
-}
+impl Drop for PipeReader { fn drop(&mut self) { self.cancelled.store(true, Ordering::Relaxed); } }
 
 impl Read for PipeReader {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        if buffer.is_empty() {
-            return Ok(0);
-        }
+        if buffer.is_empty() { return Ok(0); }
         if self.offset == self.chunk.len() {
             match self.receiver.recv() {
                 Ok(chunk) => {

@@ -20,17 +20,9 @@ const EOS_MAGIC: u64 = 0x1772_4538_5090;
 const AUTO_WORKERS: usize = 12;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct EncodeReport {
-    pub input_len: u64,
-    pub output_len: u64,
-    pub blocks: u64,
-}
+pub struct EncodeReport { pub input_len: u64, pub output_len: u64, pub blocks: u64 }
 
-struct BlockJob {
-    rle: Vec<u8>,
-    crc: u32,
-    input_len: usize,
-}
+struct BlockJob { rle: Vec<u8>, crc: u32, input_len: usize }
 
 struct EncodedBlock {
     bytes: Vec<u8>,
@@ -41,26 +33,14 @@ struct EncodedBlock {
 
 fn write_symbol_map(output: &mut BitWriter, in_use: &[u8]) {
     let mut used = [false; 256];
-    for &byte in in_use {
-        used[byte as usize] = true;
-    }
+    for &byte in in_use { used[byte as usize] = true; }
     let mut groups = 0_u32;
-    for (index, chunk) in used.chunks(16).enumerate() {
-        if chunk.iter().any(|&value| value) {
-            groups |= 1 << (15 - index);
-        }
-    }
+    for (index, chunk) in used.chunks(16).enumerate() { if chunk.iter().any(|&value| value) { groups |= 1 << (15 - index); } }
     output.write_bits(16, groups);
     for (index, chunk) in used.chunks(16).enumerate() {
-        if groups & (1 << (15 - index)) == 0 {
-            continue;
-        }
+        if groups & (1 << (15 - index)) == 0 { continue; }
         let mut bits = 0_u32;
-        for (bit, &value) in chunk.iter().enumerate() {
-            if value {
-                bits |= 1 << (15 - bit);
-            }
-        }
+        for (bit, &value) in chunk.iter().enumerate() { if value { bits |= 1 << (15 - bit); } }
         output.write_bits(16, bits);
     }
 }
@@ -84,17 +64,13 @@ fn encode_block(job: BlockJob) -> EncodedBlock {
         let end = (start + huffman::GROUP_SIZE).min(symbols.syms.len());
         let lengths = &coding.lens[table as usize];
         let codes = &coding.codes[table as usize];
-        for &symbol in &symbols.syms[start..end] {
-            output.write_bits(lengths[symbol as usize] as u32, codes[symbol as usize]);
-        }
+        for &symbol in &symbols.syms[start..end] { output.write_bits(lengths[symbol as usize] as u32, codes[symbol as usize]); }
     }
     let (bytes, bit_len) = output.finish_bits();
     EncodedBlock { bytes, bit_len, crc: job.crc, input_len: job.input_len }
 }
 
-fn reservation(block_limit: usize) -> usize {
-    block_limit.saturating_mul(32)
-}
+fn reservation(block_limit: usize) -> usize { block_limit.saturating_mul(32) }
 
 pub struct Encoder<W: Write> {
     output: Option<W>,
@@ -141,9 +117,7 @@ impl<W: Write> Encoder<W> {
             output_len: 0,
             blocks: 0,
         };
-        for byte in [b'B', b'Z', b'h', b'0' + level] {
-            encoder.bits.write_u8(byte);
-        }
+        for byte in [b'B', b'Z', b'h', b'0' + level] { encoder.bits.write_u8(byte); }
         encoder.drain_bits()?;
         Ok(encoder)
     }
@@ -166,12 +140,8 @@ impl<W: Write> Encoder<W> {
     }
 
     fn submit_block(&mut self) -> Result<()> {
-        if self.block.is_empty() {
-            return Ok(());
-        }
-        while !self.pipeline.can_submit(self.reservation) {
-            self.commit_next()?;
-        }
+        if self.block.is_empty() { return Ok(()); }
+        while !self.pipeline.can_submit(self.reservation) { self.commit_next()?; }
         let rle = std::mem::replace(&mut self.block, Vec::with_capacity(self.block_limit));
         let crc = std::mem::replace(&mut self.block_crc, Bz2Crc::new()).finish();
         let input_len = std::mem::take(&mut self.block_input_len);
@@ -179,9 +149,7 @@ impl<W: Write> Encoder<W> {
     }
 
     fn commit_group(&mut self, group: rle1::Group) -> Result<()> {
-        if self.block.len() + group.encoded_len() > self.block_limit {
-            self.submit_block()?;
-        }
+        if self.block.len() + group.encoded_len() > self.block_limit { self.submit_block()?; }
         group.write_into(&mut self.block);
         self.block_crc.push_repeat(group.byte, group.raw_len);
         self.block_input_len += group.raw_len;
@@ -189,13 +157,9 @@ impl<W: Write> Encoder<W> {
     }
 
     pub fn finish(mut self) -> Result<(W, EncodeReport)> {
-        if let Some(group) = self.runs.finish() {
-            self.commit_group(group)?;
-        }
+        if let Some(group) = self.runs.finish() { self.commit_group(group)?; }
         self.submit_block()?;
-        while self.pipeline.has_pending() {
-            self.commit_next()?;
-        }
+        while self.pipeline.has_pending() { self.commit_next()?; }
         self.bits.write_magic(EOS_MAGIC);
         self.bits.write_u32(self.combined_crc);
         let trailing = std::mem::take(&mut self.bits).finish();
@@ -209,11 +173,7 @@ impl<W: Write> Encoder<W> {
 
 impl<W: Write> Write for Encoder<W> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        for &byte in bytes {
-            if let Some(group) = self.runs.push(byte) {
-                self.commit_group(group).map_err(Error::into_io)?;
-            }
-        }
+        for &byte in bytes { if let Some(group) = self.runs.push(byte) { self.commit_group(group).map_err(Error::into_io)?; } }
         Ok(bytes.len())
     }
 

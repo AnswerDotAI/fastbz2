@@ -12,9 +12,7 @@ use flate2::{Compression, write::GzEncoder};
 mod support;
 use support::simplewiki_prefix;
 
-fn requested_threads() -> usize {
-    std::env::var("FBZ_THREADS").ok().map(|value| value.parse().expect("FBZ_THREADS must be an integer")).unwrap_or(0)
-}
+fn requested_threads() -> usize { std::env::var("FBZ_THREADS").ok().map(|value| value.parse().expect("FBZ_THREADS must be an integer")).unwrap_or(0) }
 
 fn binary() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_fbz"));
@@ -48,15 +46,9 @@ fn timed(action: impl FnOnce()) -> Duration {
     started.elapsed()
 }
 
-fn timed_command(command: &mut Command) -> Duration {
-    timed(|| assert!(command.status().unwrap().success()))
-}
+fn timed_command(command: &mut Command) -> Duration { timed(|| assert!(command.status().unwrap().success())) }
 
-struct Fixture {
-    directory: tempfile::TempDir,
-    contents: Vec<u8>,
-    input: std::path::PathBuf,
-}
+struct Fixture { directory: tempfile::TempDir, contents: Vec<u8>, input: std::path::PathBuf }
 
 fn fixture(extension: &str, encode: impl Fn(&[u8]) -> Vec<u8>) -> Fixture {
     let directory = tempfile::tempdir().unwrap();
@@ -117,28 +109,18 @@ fn tar_crate_reference() {
     eprintln!("uncompressed tar crate: {extract_time:.3?}");
 }
 
-struct CadenceSink {
-    started: Instant,
-    bytes: usize,
-    events: Vec<(usize, Duration)>,
-}
+struct CadenceSink { started: Instant, bytes: usize, events: Vec<(usize, Duration)> }
 
 impl CadenceSink {
-    fn new() -> Self {
-        Self { started: Instant::now(), bytes: 0, events: Vec::new() }
-    }
+    fn new() -> Self { Self { started: Instant::now(), bytes: 0, events: Vec::new() } }
 
     fn record(&mut self, bytes: usize) {
-        if bytes == 0 {
-            return;
-        }
+        if bytes == 0 { return; }
         self.bytes += bytes;
         self.events.push((self.bytes, self.started.elapsed()));
     }
 
-    fn milestone(&self, bytes: usize) -> Duration {
-        self.events.iter().find(|(total, _)| *total >= bytes).unwrap().1
-    }
+    fn milestone(&self, bytes: usize) -> Duration { self.events.iter().find(|(total, _)| *total >= bytes).unwrap().1 }
 }
 
 impl OutputSink for CadenceSink {
@@ -179,24 +161,16 @@ fn tgz_output_cadence() {
 
 #[test]
 #[ignore = "local single-run fbz gzip tar extraction overhead"]
-fn tgz_fbz_overhead() {
-    fbz_overhead("tgz", gzip);
-}
+fn tgz_fbz_overhead() { fbz_overhead("tgz", gzip); }
 
 #[test]
 #[ignore = "local single-run system gzip tar extraction reference"]
-fn tgz_system_reference() {
-    system_reference("tgz", gzip);
-}
+fn tgz_system_reference() { system_reference("tgz", gzip); }
 
 #[test]
 #[ignore = "local single-run fbz bzip2 tar extraction overhead"]
-fn tbz2_fbz_overhead() {
-    fbz_overhead("tbz2", |contents| compress(contents, Level::BEST));
-}
+fn tbz2_fbz_overhead() { fbz_overhead("tbz2", |contents| compress(contents, Level::BEST)); }
 
 #[test]
 #[ignore = "local single-run system bzip2 tar extraction reference"]
-fn tbz2_system_reference() {
-    system_reference("tbz2", |contents| compress(contents, Level::BEST));
-}
+fn tbz2_system_reference() { system_reference("tbz2", |contents| compress(contents, Level::BEST)); }

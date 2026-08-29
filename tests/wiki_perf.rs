@@ -25,18 +25,12 @@ impl Write for CountingSink {
         Ok(buffer.len())
     }
 
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
+    fn flush(&mut self) -> io::Result<()> { Ok(()) }
 }
 
-fn corpus_path(name: &str) -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("meta").join(name)
-}
+fn corpus_path(name: &str) -> std::path::PathBuf { Path::new(env!("CARGO_MANIFEST_DIR")).join("meta").join(name) }
 
-fn requested_threads() -> usize {
-    std::env::var("FBZ_THREADS").ok().map(|value| value.parse().expect("FBZ_THREADS must be an integer")).unwrap_or(0)
-}
+fn requested_threads() -> usize { std::env::var("FBZ_THREADS").ok().map(|value| value.parse().expect("FBZ_THREADS must be an integer")).unwrap_or(0) }
 
 fn physical_footprint_mib(metrics: &common::ProcessMetrics) -> f64 {
     metrics.peak_phys_footprint_bytes.map_or(f64::NAN, |bytes| bytes as f64 / (1024.0 * 1024.0))

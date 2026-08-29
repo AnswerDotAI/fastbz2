@@ -25,9 +25,7 @@ fn bzip2_encoder_parallel_blocks_and_incremental_writes() {
     let input = support::patterned_bytes_with(220_000, 17, 101);
     let mut encoded = Vec::new();
     let mut encoder = Bzip2Encoder::new(&mut encoded, EncodeOptions { threads: 4, memory_limit: 64 * 1024 * 1024, level: Some(1) }).unwrap();
-    for chunk in input.chunks(7777) {
-        encoder.write_all(chunk).unwrap();
-    }
+    for chunk in input.chunks(7777) { encoder.write_all(chunk).unwrap(); }
     encoder.flush().unwrap();
     let (_, report) = encoder.finish().unwrap();
     assert_eq!(report.input_len, input.len() as u64);

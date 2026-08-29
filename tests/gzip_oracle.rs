@@ -15,9 +15,7 @@ fn oracle_decompress(input: &[u8]) -> Vec<u8> {
     output
 }
 
-fn patterned(size: usize) -> Vec<u8> {
-    (0..size).map(|index| ((index * 37 + index / 251) & 255) as u8).collect()
-}
+fn patterned(size: usize) -> Vec<u8> { (0..size).map(|index| ((index * 37 + index / 251) & 255) as u8).collect() }
 
 #[cfg(not(debug_assertions))]
 fn random_bytes(size: usize) -> Vec<u8> {
@@ -35,9 +33,7 @@ fn random_bytes(size: usize) -> Vec<u8> {
 #[cfg(not(debug_assertions))]
 fn random_nibbles(size: usize) -> Vec<u8> {
     let mut bytes = random_bytes(size);
-    for byte in &mut bytes {
-        *byte &= 0x0f;
-    }
+    for byte in &mut bytes { *byte &= 0x0f; }
     bytes
 }
 
@@ -87,12 +83,8 @@ fn assert_performance(plain: &[u8], limit: f64) {
     let encoded = compress(plain);
     assert_eq!(gzip::decompress(&encoded).unwrap(), oracle_decompress(&encoded));
     let repeats = 2;
-    let fbz_time = benchmark::elapsed(repeats, || {
-        std::hint::black_box(gzip::decompress(&encoded).unwrap());
-    });
-    let oracle_time = benchmark::elapsed(repeats, || {
-        std::hint::black_box(oracle_decompress(&encoded));
-    });
+    let fbz_time = benchmark::elapsed(repeats, || { std::hint::black_box(gzip::decompress(&encoded).unwrap()); });
+    let oracle_time = benchmark::elapsed(repeats, || { std::hint::black_box(oracle_decompress(&encoded)); });
     assert!(fbz_time.as_secs_f64() <= oracle_time.as_secs_f64() * limit, "fbz gzip {fbz_time:?} exceeded {limit}x oracle {oracle_time:?}");
 }
 

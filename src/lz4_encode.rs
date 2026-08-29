@@ -17,15 +17,9 @@ const TARGET_BLOCK_SIZE: usize = 4 * 1024 * 1024;
 const MIN_BLOCK_SIZE: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct EncodeReport {
-    pub input_len: u64,
-    pub output_len: u64,
-    pub blocks: u64,
-}
+pub struct EncodeReport { pub input_len: u64, pub output_len: u64, pub blocks: u64 }
 
-fn invalid(message: impl Into<String>) -> Error {
-    Error::InvalidConfiguration(message.into())
-}
+fn invalid(message: impl Into<String>) -> Error { Error::InvalidConfiguration(message.into()) }
 
 fn xxhash32(data: &[u8]) -> u32 {
     let mut hasher = XxHash32::with_seed(0);
@@ -33,15 +27,7 @@ fn xxhash32(data: &[u8]) -> u32 {
     hasher.finish() as u32
 }
 
-fn chain_depth(level: u8) -> usize {
-    match level {
-        1..=6 => 1,
-        7 => 4,
-        8 => 16,
-        9 => 64,
-        _ => unreachable!(),
-    }
-}
+fn chain_depth(level: u8) -> usize { match level { 1..=6 => 1, 7 => 4, 8 => 16, 9 => 64, _ => unreachable!() } }
 
 fn write_length(output: &mut Vec<u8>, mut length: usize) {
     while length >= 255 {
@@ -56,22 +42,16 @@ fn write_sequence(output: &mut Vec<u8>, literals: &[u8], distance: usize, match_
     let match_base = match_length - 4;
     let match_nibble = match_base.min(15);
     output.push(((literal_nibble << 4) | match_nibble) as u8);
-    if literals.len() >= 15 {
-        write_length(output, literals.len() - 15);
-    }
+    if literals.len() >= 15 { write_length(output, literals.len() - 15); }
     output.extend_from_slice(literals);
     output.extend_from_slice(&(distance as u16).to_le_bytes());
-    if match_base >= 15 {
-        write_length(output, match_base - 15);
-    }
+    if match_base >= 15 { write_length(output, match_base - 15); }
 }
 
 fn write_last_literals(output: &mut Vec<u8>, literals: &[u8]) {
     let literal_nibble = literals.len().min(15);
     output.push((literal_nibble << 4) as u8);
-    if literals.len() >= 15 {
-        write_length(output, literals.len() - 15);
-    }
+    if literals.len() >= 15 { write_length(output, literals.len() - 15); }
     output.extend_from_slice(literals);
 }
 
@@ -95,9 +75,7 @@ fn compress_block_fast(input: &[u8]) -> Vec<u8> {
         }
         write_sequence(&mut output, &input[anchor..position], distance, length);
         let end = position + length;
-        if end >= 2 {
-            finder.insert(input, end - 2);
-        }
+        if end >= 2 { finder.insert(input, end - 2); }
         position = end;
         anchor = end;
     }
@@ -127,9 +105,7 @@ fn compress_block_high(input: &[u8], level: u8) -> Vec<u8> {
         }
         write_sequence(&mut output, &input[anchor..position], distance, length);
         let end = position + length;
-        if end >= 2 {
-            finder.insert(input, end - 2);
-        }
+        if end >= 2 { finder.insert(input, end - 2); }
         position = end;
         anchor = end;
     }
@@ -137,15 +113,9 @@ fn compress_block_high(input: &[u8], level: u8) -> Vec<u8> {
     output
 }
 
-fn compress_block(input: &[u8], level: u8) -> Vec<u8> {
-    if level <= 6 { compress_block_fast(input) } else { compress_block_high(input, level) }
-}
+fn compress_block(input: &[u8], level: u8) -> Vec<u8> { if level <= 6 { compress_block_fast(input) } else { compress_block_high(input, level) } }
 
-struct Block {
-    bytes: Vec<u8>,
-    input_len: usize,
-    stored: bool,
-}
+struct Block { bytes: Vec<u8>, input_len: usize, stored: bool }
 
 fn encode_block(input: Vec<u8>, level: u8) -> Block {
     let input_len = input.len();
@@ -153,29 +123,16 @@ fn encode_block(input: Vec<u8>, level: u8) -> Block {
     if encoded.len() < input.len() { Block { bytes: encoded, input_len, stored: false } } else { Block { bytes: input, input_len, stored: true } }
 }
 
-fn reservation(block_size: usize) -> usize {
-    block_size.saturating_mul(6).saturating_add((1 << 16) * size_of::<u32>())
-}
+fn reservation(block_size: usize) -> usize { block_size.saturating_mul(6).saturating_add((1 << 16) * size_of::<u32>()) }
 
 fn selected_block_size(memory_limit: usize) -> Result<usize> {
     let mut size = TARGET_BLOCK_SIZE;
-    while size > MIN_BLOCK_SIZE && reservation(size) > memory_limit {
-        size /= 4;
-    }
-    if reservation(size) > memory_limit {
-        return Err(invalid(format!("compression memory limit must be at least {} bytes", reservation(size))));
-    }
+    while size > MIN_BLOCK_SIZE && reservation(size) > memory_limit { size /= 4; }
+    if reservation(size) > memory_limit { return Err(invalid(format!("compression memory limit must be at least {} bytes", reservation(size)))); }
     Ok(size)
 }
 
-fn descriptor_code(block_size: usize) -> u8 {
-    match block_size {
-        64_000..=65_536 => 4,
-        65_537..=262_144 => 5,
-        262_145..=1_048_576 => 6,
-        _ => 7,
-    }
-}
+fn descriptor_code(block_size: usize) -> u8 { match block_size { 64_000..=65_536 => 4, 65_537..=262_144 => 5, 262_145..=1_048_576 => 6, _ => 7 } }
 
 pub struct Encoder<W: Write> {
     output: Option<W>,
@@ -219,9 +176,7 @@ impl<W: Write> Encoder<W> {
     fn commit_next(&mut self) -> Result<()> {
         let block = self.pipeline.take_next()?;
         let mut size = block.bytes.len() as u32;
-        if block.stored {
-            size |= 1 << 31;
-        }
+        if block.stored { size |= 1 << 31; }
         let output = self.output.as_mut().unwrap();
         output.write_all(&size.to_le_bytes())?;
         output.write_all(&block.bytes)?;
@@ -232,12 +187,8 @@ impl<W: Write> Encoder<W> {
     }
 
     fn submit_buffer(&mut self) -> Result<()> {
-        if self.buffer.is_empty() {
-            return Ok(());
-        }
-        while !self.pipeline.can_submit(self.reservation) {
-            self.commit_next()?;
-        }
+        if self.buffer.is_empty() { return Ok(()); }
+        while !self.pipeline.can_submit(self.reservation) { self.commit_next()?; }
         let input = std::mem::replace(&mut self.buffer, Vec::with_capacity(self.block_size));
         let level = self.options.level.unwrap();
         self.pipeline.submit(self.reservation, move || encode_block(input, level))
@@ -245,9 +196,7 @@ impl<W: Write> Encoder<W> {
 
     fn flush_blocks(&mut self) -> Result<()> {
         self.submit_buffer()?;
-        while self.pipeline.has_pending() {
-            self.commit_next()?;
-        }
+        while self.pipeline.has_pending() { self.commit_next()?; }
         Ok(())
     }
 
@@ -271,9 +220,7 @@ impl<W: Write> Write for Encoder<W> {
             let take = bytes.len().min(self.block_size - self.buffer.len());
             self.buffer.extend_from_slice(&bytes[..take]);
             bytes = &bytes[take..];
-            if self.buffer.len() == self.block_size {
-                self.submit_buffer().map_err(Error::into_io)?;
-            }
+            if self.buffer.len() == self.block_size { self.submit_buffer().map_err(Error::into_io)?; }
         }
         Ok(total)
     }
