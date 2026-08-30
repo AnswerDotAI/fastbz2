@@ -38,13 +38,13 @@ jobs:
       - name: Stage native binary
         if: runner.os != 'Linux'
         run: |
-          cargo build --release --bins
-          python tools/stage_binaries.py
+          cargo build --profile dist --bins
+          python tools/stage_binaries.py dist
       - uses: PyO3/maturin-action@v1
         with:
-          args: --release --out dist -i python3.10 -i python3.11 -i python3.12 -i python3.13 -i python3.14
+          args: --profile dist --out dist -i python3.10 -i python3.11 -i python3.12 -i python3.13 -i python3.14
           manylinux: auto
-          before-script-linux: cargo build --release --bins && python3.10 tools/stage_binaries.py
+          before-script-linux: cargo build --profile dist --bins && python3.10 tools/stage_binaries.py dist
       - uses: actions/upload-artifact@v7
         with:
           name: wheels-${{ matrix.os }}

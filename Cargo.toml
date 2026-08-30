@@ -20,9 +20,21 @@ path = "src/bin/fbz.rs"
 test = false
 
 [profile.release]
+lto = false
+codegen-units = 16
+
+[profile.release.package.fbz]
+incremental = true
+
+[profile.dist]
+inherits = "release"
 lto = true
+incremental = false
 codegen-units = 1
 strip = true
+
+[profile.dist.package.fbz]
+incremental = false
 
 [dependencies]
 blake3 = "1.8.7"
