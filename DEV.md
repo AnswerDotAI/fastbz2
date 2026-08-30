@@ -369,7 +369,7 @@ CI tests and builds Linux on x86-64 and ARM64, and macOS on ARM64. macOS Intel r
 
 The canonical version lives in `Cargo.toml`. `pyproject.toml` gets the Python package version from Cargo via `dynamic = ["version"]`.
 
-The thin PEP 517 backend delegates to Maturin after building and staging the native executable, so repository and editable builds contain the same native CLI as CI-built wheels. Releases publish platform wheels rather than a Python sdist; the Rust source package is published separately to crates.io.
+The thin PEP 517 backend delegates to Maturin after building and staging the native executable, so repository and editable builds contain the same native CLI as CI-built wheels. Ordinary builds use the incremental `release` profile; CI builds distributed wheels and executables with the full-LTO, single-codegen-unit, stripped `dist` profile. Releases publish platform wheels rather than a Python sdist; the Rust source package is published separately to crates.io.
 
 ## Release
 
