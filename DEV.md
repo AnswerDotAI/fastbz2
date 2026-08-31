@@ -307,8 +307,7 @@ cargo test --release --test wiki_perf rapidgzip_rust_process_metrics -- --ignore
 cargo test --release --test wiki_perf system_gzip_process_metrics -- --ignored --exact --nocapture
 ```
 
-The metrics helper uses `wait4` and, on macOS, `proc_pid_rusage`'s `ri_phys_footprint` field on its own child; it needs no task-inspection permission. Wall time stops as soon as `wait4` reports child exit, before joining the 50 ms footprint sampler, so short-process timings do not include sampler shutdown latency.
-The 1,000-stream enwiki comparison has a separate ignored test for each implementation and mode so a changed decoder can be measured without rerunning unchanged baselines. Each test reads the compressed fixture before starting its single timed decode, with no warmups or repeats:
+The metrics helper uses `wait4` and, on macOS, `proc_pid_rusage`'s `ri_phys_footprint` field on its own child; it needs no task-inspection permission. Wall time stops as soon as `wait4` reports child exit, before joining the 50 ms footprint sampler, so short-process timings do not include sampler shutdown latency. The 1,000-stream enwiki comparison has a separate ignored test for each implementation and mode so a changed decoder can be measured without rerunning unchanged baselines. Each test reads the compressed fixture before starting its single timed decode, with no warmups or repeats:
 
 ```bash
 cargo test --release --test wiki_perf enwiki_first_1000_fbz_parallel -- --ignored --exact --nocapture
